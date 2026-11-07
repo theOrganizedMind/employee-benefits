@@ -1,22 +1,24 @@
-# Employee Benefits Calculator
+# Employee Benefits Manager
 
-This project calculates employee payroll, raises, bonuses, vacation pay,
-health insurance costs, and BCBS weekly deductions. It includes a Tkinter GUI
-for selecting calculations, filtering employees, viewing history, and charting
-salary totals by year.
+This project provides a tabbed Tkinter application for managing employee
+benefits and compensation data, including time off, performance reviews,
+deductions, raises/bonuses, reminders, and charts.
 
 ## Project Structure
 
-- **employee_benefits.py**: Loads employee configuration and runs the Tkinter
-  application and calculation reports.
+- **employee_benefits.py**: Main tabbed Tkinter application with CRUD,
+  imports/exports, reminders, charts, and settings.
 - **employee.py**: Defines the `Employee` class and its compensation and
   insurance calculations.
 - **json_files/employee_details.json**: Private employee configuration used
   when it exists.
 - **employee_details.json**: Public fallback employee configuration.
+- **json_files/employee_benefits_records.json**: Persistent GUI data store for
+  app records and settings.
 - **payroll.py**: Standalone payroll totals example using its employee map.
-- **requirements.txt**: Dependency list. The application currently uses only
-  Python standard-library modules.
+- **tests/test_employee_benefits.py**: Pytest unit and GUI interaction tests.
+- **requirements.txt**: Dependency list (includes `pytest`, `matplotlib`,
+  `openpyxl`, and `tkcalendar`).
 - **LICENSE.txt**: MIT license.
 
 ## Installation
@@ -42,20 +44,61 @@ Run the application from the project directory:
 python employee_benefits.py
 ```
 
-Use the **Calculation** dropdown to choose one of these options:
+The GUI includes these tabs:
 
-- **BCBS weekly deductions**: Shows current-year health insurance totals and
-  weekly employee deductions.
-- **Raises and bonuses**: Calculates health insurance, bonuses, raises,
-  vacation pay, and updated payroll totals.
-- **Employee history**: Displays each selected employee's salary, raise, bonus,
-  and performance rating for every configured year.
-- **Salary by year line chart**: Displays total salary by year for the selected
-  employee or all employees.
+- **Time Off**
+  - Track Vacation, Sick, and Not Paid requests
+  - Automatically calculate duration from Start/End dates
+  - Group/sort by Year and Employee Name
+  - Import/export CSV and XLSX
+- **Performance**
+  - Track review date, rating, summary, and notes
+  - Import/export CSV and XLSX
+- **Deductions**
+  - Track BCBS, Loan, and Child Support deductions
+  - Weekly deduction formula:
+    `(Monthly Amount - Employer Contribution) / 4`
+  - Import/export CSV and XLSX
+- **Raises & Bonuses**
+  - Track Raise and Bonus records with effective dates
+  - Uses payroll-based calculation logic
+  - Import/export CSV and XLSX
+- **Admin**
+  - Manage employee hire/termination, pay type/pay, status, and notes
+  - Track available vacation/sick hours and active/inactive status
+  - Import/export CSV and XLSX
+- **Settings**
+  - Configure preset defaults:
+    - Default Vacation Hours
+    - Default Sick Hours
+    - Default Employer Contribution
+  - Presets are persisted and used by forms and annual resets
+- **Reminders**
+  - Show upcoming time off and hire-date anniversaries
+  - Export reminder view to CSV/XLSX
+- **Charts**
+  - Launch standalone matplotlib charts (outside table view)
+  - Includes payroll, raises/bonuses, deductions, and time-off Gantt
+  - Tracks yearly totals for payroll, raises/bonuses, and time off
 
-The **Employee filter** supports selecting all employees or typing part of an
-employee's name to narrow the choices. Click **Calculate** to display the
-selected report.
+Employee name fields use autosuggest after at least 5 typed characters.
+Date fields use `tkcalendar` when available, with `YYYY-MM-DD` entry fallback.
+
+## Testing
+
+Run the test suite with:
+
+```sh
+pytest -q
+```
+
+Tests include:
+
+- Unit tests for core validation/calculation utilities
+- GUI tests for Tkinter interactions (autosuggest, settings defaults, layout,
+  deduction calculations, annual reset behavior)
+
+If Tk cannot be initialized in your environment, GUI tests are skipped.
 
 ### Payroll Totals Script
 
