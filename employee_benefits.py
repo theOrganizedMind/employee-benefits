@@ -32,8 +32,10 @@ if not LOGGER.handlers:
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PRIVATE_CONFIG_PATH = os.path.join(BASE_DIR, "json_files", "employee_details.json")
-PUBLIC_CONFIG_PATH = os.path.join(BASE_DIR, "employee_details.json")
-DATA_STORE_PATH = os.path.join(BASE_DIR, "json_files", "employee_benefits_records.json")
+PUBLIC_CONFIG_PATH = os.path.join(BASE_DIR, "employee_details_public.json")
+PRIVATE_DATA_STORE_PATH = os.path.join(BASE_DIR, "json_files", "employee_benefits_records.json")
+PUBLIC_DATA_STORE_PATH = os.path.join(BASE_DIR, "employee_benefits_records_public.json")
+DATA_STORE_PATH = PRIVATE_DATA_STORE_PATH
 
 DATE_FORMAT = "%Y-%m-%d"
 DEFAULT_REMINDER_LOOKAHEAD_DAYS = 60
@@ -44,11 +46,15 @@ DEFAULT_SICK_HOURS = 40.0
 DEFAULT_EMPLOYER_CONTRIBUTION = 300.0
 
 TAB_KEYS = ("time_off", "performance", "deductions", "raises_bonuses", "admin")
+ANNUAL_WORK_HOURS = (Employee.REG_HOURS + (Employee.OVERTIME_MULTIPLIER * Employee.OT_HOURS)) * Employee.WEEKS
 
 
 def load_employee_details_seed():
     """Load base employee details from private path first, then public path."""
-    config_path = PRIVATE_CONFIG_PATH if os.path.isfile(PRIVATE_CONFIG_PATH) else PUBLIC_CONFIG_PATH
+    if os.path.isfile(PRIVATE_CONFIG_PATH):
+        config_path = PRIVATE_CONFIG_PATH
+    elif os.path.isfile(PUBLIC_CONFIG_PATH):
+        config_path = PUBLIC_CONFIG_PATH
     with open(config_path, encoding="utf-8") as config_file:
         return json.load(config_file)
 
@@ -102,6 +108,13 @@ def annualized_pay(pay_type, pay):
             2,
         )
     return round(pay, 2)
+
+
+def hourly_rate_from_annual(annual_pay):
+    """Convert annualized pay to hourly equivalent using configured work hours."""
+    if ANNUAL_WORK_HOURS <= 0:
+        return 0.0
+    return round(float(annual_pay) / ANNUAL_WORK_HOURS, 2)
 
 
 def record_year(date_value):
@@ -169,6 +182,8 @@ class EmployeeBenefitsApp:
         self.root.title("Employee Benefits Manager")
         self.root.geometry("1400x900")
         self.root.minsize(1120, 720)
+        self._raises_sync_in_progress = False
+        self.data_store_path = self._resolve_data_store_path()
         self.store = self._load_store()
         self.tabs = {}
         self.settings_widgets = {}
@@ -178,14 +193,24 @@ class EmployeeBenefitsApp:
         self._build_ui()
         self._refresh_all_tabs()
 
+    def _resolve_data_store_path(self):
+        """Resolve private/public records path with explicit fallback support."""
+        if DATA_STORE_PATH != PRIVATE_DATA_STORE_PATH:
+            return DATA_STORE_PATH
+        if os.path.exists(PRIVATE_DATA_STORE_PATH):
+            return PRIVATE_DATA_STORE_PATH
+        if os.path.exists(PUBLIC_DATA_STORE_PATH):
+            return PUBLIC_DATA_STORE_PATH
+        return PRIVATE_DATA_STORE_PATH
+
     def _load_store(self):
         """Load persisted records and normalize structure for current schema."""
-        if not os.path.exists(DATA_STORE_PATH):
+        if not os.path.exists(self.data_store_path):
             store = make_default_store()
             self._save_store(store)
             return store
 
-        with open(DATA_STORE_PATH, encoding="utf-8") as file:
+        with open(self.data_store_path, encoding="utf-8") as file:
             loaded = json.load(file)
 
         store = make_default_store()
@@ -252,11 +277,126 @@ class EmployeeBenefitsApp:
             row.setdefault("weekly_deduction", round((float(row["monthly_amount"]) - float(row["employer_contribution"])) / 4, 2))
             row.pop("amount", None)
 
+        for row in store["raises_bonuses"]:
+            self._migrate_raise_bonus_row(row, store["admin"])
+
+        self._apply_pending_raises_to_admin(store=store)
+
+    def _migrate_raise_bonus_row(self, row, admin_rows):
+        """Backfill legacy raise/bonus records to the current schema."""
+        change_type = normalize_text(row.get("change_type", "Raise")) or "Raise"
+        employee_name = normalize_text(row.get("employee_name", ""))
+        yearly_difference = float(row.get("yearly_difference", row.get("calculated_value", 0.0)) or 0.0)
+        bonus_percent = float(row.get("bonus_percent", 0.0) or 0.0)
+        if bonus_percent > 1:
+            bonus_percent = bonus_percent / 100
+
+        hourly_from = float(row.get("hourly_from_amount", 0.0) or 0.0)
+        yearly_from = float(row.get("yearly_from_amount", 0.0) or 0.0)
+        has_current_schema_values = (
+            hourly_from > 0
+            or yearly_from > 0
+            or float(row.get("hourly_to_amount", 0.0) or 0.0) > 0
+            or float(row.get("yearly_to_amount", 0.0) or 0.0) > 0
+        )
+        if employee_name and not has_current_schema_values:
+            admin_record = self._find_admin_record(admin_rows, employee_name)
+            if admin_record:
+                hourly_from, yearly_from = self._compensation_snapshot(admin_record)
+        if yearly_from == 0 and hourly_from > 0:
+            yearly_from = annualized_pay("Hourly", hourly_from)
+        if hourly_from == 0 and yearly_from > 0:
+            hourly_from = hourly_rate_from_annual(yearly_from)
+
+        bonus_amount = float(row.get("bonus_amount", 0.0) or 0.0)
+        if change_type == "Bonus" and bonus_amount <= 0:
+            bonus_amount = yearly_difference if yearly_difference > 0 else round(yearly_from * bonus_percent, 2)
+        if change_type == "Raise":
+            bonus_amount = 0.0
+            bonus_percent = 0.0
+
+        yearly_to = float(row.get("yearly_to_amount", 0.0) or 0.0)
+        if yearly_to <= 0:
+            if change_type == "Bonus":
+                yearly_to = round(yearly_from + bonus_amount, 2)
+            else:
+                yearly_to = round(yearly_from + yearly_difference, 2)
+        hourly_to = float(row.get("hourly_to_amount", 0.0) or 0.0)
+        if hourly_to <= 0 and yearly_to > 0:
+            hourly_to = hourly_rate_from_annual(yearly_to)
+
+        yearly_difference = round(yearly_to - yearly_from, 2)
+        payroll_increase_percent = 0.0 if yearly_from <= 0 else round((yearly_difference / yearly_from) * 100, 4)
+
+        row["change_type"] = "Bonus" if change_type == "Bonus" else "Raise"
+        row["hourly_from_amount"] = round(hourly_from, 2)
+        row["hourly_to_amount"] = round(hourly_to, 2)
+        row["yearly_from_amount"] = round(yearly_from, 2)
+        row["yearly_to_amount"] = round(yearly_to, 2)
+        row["yearly_difference"] = yearly_difference
+        row["payroll_increase_percent"] = payroll_increase_percent
+        row["bonus_amount"] = round(bonus_amount, 2)
+        row["bonus_percent"] = round(bonus_percent, 6)
+        row.setdefault("notes", "")
+        row.setdefault("applied_to_admin", True)
+
+        row.pop("amount", None)
+        row.pop("calculated_value", None)
+
+    def _apply_pending_raises_to_admin(self, store=None):
+        """Apply effective-date-due raises to Admin pay one time per raise record."""
+        active_store = store or self.store
+        today = date.today()
+        changed = False
+
+        def parse_effective(row):
+            """Parse effective date for sorting/application; invalid dates are ignored."""
+            try:
+                return parse_date(row.get("effective_date", ""), "Effective Date")
+            except ValueError:
+                return None
+
+        rows = sorted(
+            active_store["raises_bonuses"],
+            key=lambda row: (
+                parse_effective(row) or date.min,
+                normalize_text(row.get("employee_name", "")).casefold(),
+            ),
+        )
+        for row in rows:
+            if normalize_text(row.get("change_type", "Raise")) != "Raise":
+                row["applied_to_admin"] = True
+                continue
+            if row.get("applied_to_admin", False):
+                continue
+            effective_date = parse_effective(row)
+            if not effective_date or effective_date > today:
+                continue
+            admin_record = self._find_admin_record(active_store["admin"], row.get("employee_name", ""))
+            if not admin_record:
+                continue
+            pay_type = normalize_text(admin_record.get("pay_type", "Hourly")) or "Hourly"
+            if pay_type == "Hourly":
+                admin_record["pay"] = round(float(row.get("hourly_to_amount", admin_record.get("pay", 0.0)) or 0.0), 2)
+            else:
+                admin_record["pay"] = round(float(row.get("yearly_to_amount", admin_record.get("pay", 0.0)) or 0.0), 2)
+            row["applied_to_admin"] = True
+            changed = True
+        return changed
+
+    def _find_admin_record(self, admin_rows, employee_name):
+        """Return one admin row from a supplied collection by employee name."""
+        target = employee_name.casefold()
+        for row in admin_rows:
+            if normalize_text(row.get("employee_name", "")).casefold() == target:
+                return row
+        return None
+
     def _save_store(self, store=None):
         """Persist the active store JSON to disk."""
         active_store = store or self.store
-        os.makedirs(os.path.dirname(DATA_STORE_PATH), exist_ok=True)
-        with open(DATA_STORE_PATH, "w", encoding="utf-8") as file:
+        os.makedirs(os.path.dirname(self.data_store_path), exist_ok=True)
+        with open(self.data_store_path, "w", encoding="utf-8") as file:
             json.dump(active_store, file, indent=2)
 
     def _apply_annual_reset_if_needed(self):
@@ -370,6 +510,8 @@ class EmployeeBenefitsApp:
         """Create one form widget based on field type and tab context."""
         if field_type == "combo":
             return ttk.Combobox(parent, textvariable=var, values=choices or (), state="readonly", width=36)
+        if field_type == "readonly_entry":
+            return ttk.Entry(parent, textvariable=var, state="readonly", width=36)
 
         if field_type == "employee_combo":
             combo = ttk.Combobox(parent, textvariable=var, values=(), state="normal", width=36)
@@ -388,6 +530,91 @@ class EmployeeBenefitsApp:
             )
 
         return ttk.Entry(parent, textvariable=var, width=36)
+
+    def _wire_raises_form_behaviors(self):
+        """Attach field synchronization for raises/bonuses form values."""
+        tab = self.tabs["raises_bonuses"]
+        tab.form_vars["employee_name"].trace_add("write", lambda *_: self._sync_raises_form_rates(source="employee"))
+        tab.form_vars["change_type"].trace_add("write", lambda *_: self._sync_raises_form_rates(source="type"))
+        tab.form_vars["hourly_to_amount"].trace_add("write", lambda *_: self._sync_raises_form_rates(source="hourly_to"))
+        tab.form_vars["yearly_to_amount"].trace_add("write", lambda *_: self._sync_raises_form_rates(source="yearly_to"))
+
+    def _sync_raises_form_rates(self, source):
+        """Auto-populate raises from-amount fields from current admin compensation."""
+        if self._raises_sync_in_progress:
+            return
+        form = self.tabs["raises_bonuses"].form_vars
+        employee_name = normalize_text(form["employee_name"].get())
+        admin_record = self._get_admin_record(employee_name) if employee_name else None
+        if not admin_record:
+            if source in {"employee", "type"}:
+                for key in ("hourly_to_amount", "yearly_to_amount"):
+                    form[key].set("")
+            for key in ("hourly_from_amount", "yearly_from_amount"):
+                form[key].set("")
+            return
+
+        pay_type = normalize_text(admin_record.get("pay_type", "Hourly")) or "Hourly"
+        hourly_from, yearly_from = self._compensation_snapshot(admin_record)
+        self._raises_sync_in_progress = True
+        try:
+            form["hourly_from_amount"].set(f"{hourly_from:.2f}")
+            form["yearly_from_amount"].set(f"{yearly_from:.2f}")
+
+            if source in {"employee", "type"}:
+                form["hourly_to_amount"].set(f"{hourly_from:.2f}")
+                form["yearly_to_amount"].set(f"{yearly_from:.2f}")
+
+            if pay_type == "Hourly":
+                hourly_text = normalize_text(form["hourly_to_amount"].get())
+                yearly_text = normalize_text(form["yearly_to_amount"].get())
+                if source in {"employee", "type", "hourly_to"} and hourly_text:
+                    try:
+                        hourly_to = as_float(hourly_text, "Hourly To Amount")
+                    except ValueError:
+                        hourly_to = None
+                    if hourly_to is not None:
+                        form["yearly_to_amount"].set(f"{annualized_pay('Hourly', hourly_to):.2f}")
+                elif source == "yearly_to" and yearly_text:
+                    try:
+                        yearly_to = as_float(yearly_text, "Yearly To Amount")
+                    except ValueError:
+                        yearly_to = None
+                    if yearly_to is not None:
+                        form["hourly_to_amount"].set(f"{hourly_rate_from_annual(yearly_to):.2f}")
+            else:
+                if source in {"employee", "type"}:
+                    form["hourly_to_amount"].set(f"{hourly_from:.2f}")
+
+            if normalize_text(form["change_type"].get()) == "Raise":
+                if not normalize_text(form["bonus_amount"].get()):
+                    form["bonus_amount"].set("0.00")
+                if not normalize_text(form["bonus_percent"].get()):
+                    form["bonus_percent"].set("0.00")
+        finally:
+            self._raises_sync_in_progress = False
+
+    def _compensation_snapshot(self, admin_record):
+        """Return current hourly and yearly pay snapshot from one admin record."""
+        pay_type = normalize_text(admin_record.get("pay_type", "Hourly")) or "Hourly"
+        pay = float(admin_record.get("pay", 0.0) or 0.0)
+        if pay_type == "Hourly":
+            hourly_rate = self._normalize_hourly_rate(pay)
+            yearly_amount = annualized_pay("Hourly", hourly_rate)
+            return hourly_rate, yearly_amount
+        yearly_amount = annualized_pay("Salary", pay)
+        hourly_rate = hourly_rate_from_annual(yearly_amount)
+        return hourly_rate, yearly_amount
+
+    def _normalize_hourly_rate(self, pay_value):
+        """Normalize stored hourly pay that may be persisted as annualized total."""
+        pay = float(pay_value or 0.0)
+        if pay <= 0:
+            return 0.0
+        # Legacy datasets may store annualized hourly totals in the hourly pay field.
+        if pay > 1000:
+            return hourly_rate_from_annual(pay)
+        return round(pay, 2)
 
     def _bind_employee_autosuggest(self, combo, variable, include_inactive):
         """Attach employee autosuggest behavior to a combobox."""
@@ -444,6 +671,7 @@ class EmployeeBenefitsApp:
             ("Clear", lambda: self._clear_form("time_off", refresh=True)),
             ("Import", lambda: self._import_records("time_off")),
             ("Export", lambda: self._export_records("time_off")),
+            ("Template", lambda: self._export_template("time_off")),
         ]
         self._add_tab(notebook, "Time Off", "time_off", fields, columns, buttons)
 
@@ -452,7 +680,7 @@ class EmployeeBenefitsApp:
         fields = [
             ("Employee Name", "employee_name", "employee_combo"),
             ("Review Date", "review_date", "date"),
-            ("Performance Rating (1-5)", "rating", "entry"),
+            ("Performance Rating (1-5)", "rating", "combo", ["1", "2", "3", "4", "5"]),
             ("Summary", "summary", "entry"),
             ("Notes", "notes", "entry"),
         ]
@@ -465,6 +693,7 @@ class EmployeeBenefitsApp:
             ("Clear", lambda: self._clear_form("performance", refresh=True)),
             ("Import", lambda: self._import_records("performance")),
             ("Export", lambda: self._export_records("performance")),
+            ("Template", lambda: self._export_template("performance")),
         ]
         self._add_tab(notebook, "Performance", "performance", fields, columns, buttons)
 
@@ -495,6 +724,7 @@ class EmployeeBenefitsApp:
             ("Clear", lambda: self._clear_form("deductions", refresh=True)),
             ("Import", lambda: self._import_records("deductions")),
             ("Export", lambda: self._export_records("deductions")),
+            ("Template", lambda: self._export_template("deductions")),
         ]
         self._add_tab(notebook, "Deductions", "deductions", fields, columns, buttons)
 
@@ -503,12 +733,28 @@ class EmployeeBenefitsApp:
         fields = [
             ("Employee Name", "employee_name", "employee_combo"),
             ("Type", "change_type", "combo", ["Raise", "Bonus"]),
-            ("Amount", "amount", "entry"),
-            ("Bonus Percent", "bonus_percent", "entry"),
             ("Effective Date", "effective_date", "date"),
+            ("Hourly From Amount", "hourly_from_amount", "readonly_entry"),
+            ("Hourly To Amount", "hourly_to_amount", "entry"),
+            ("Yearly From Amount", "yearly_from_amount", "readonly_entry"),
+            ("Yearly To Amount", "yearly_to_amount", "entry"),
+            ("Bonus Amount", "bonus_amount", "entry"),
+            ("Bonus %", "bonus_percent", "entry"),
             ("Notes", "notes", "entry"),
         ]
-        columns = ["Employee Name", "Type", "Amount", "Bonus Percent", "Effective Date", "Calculated Value", "Notes"]
+        columns = [
+            "Employee Name",
+            "Type",
+            "Effective Date",
+            "Hourly From Amount",
+            "Hourly To Amount",
+            "Yearly From Amount",
+            "Yearly To Amount",
+            "Yearly Difference",
+            "% Increase In Payroll",
+            "Bonus Amount",
+            "Bonus %",
+        ]
         buttons = [
             ("Add", lambda: self._add_record("raises_bonuses")),
             ("Update", lambda: self._update_record("raises_bonuses")),
@@ -517,8 +763,10 @@ class EmployeeBenefitsApp:
             ("Clear", lambda: self._clear_form("raises_bonuses", refresh=True)),
             ("Import", lambda: self._import_records("raises_bonuses")),
             ("Export", lambda: self._export_records("raises_bonuses")),
+            ("Template", lambda: self._export_template("raises_bonuses")),
         ]
         self._add_tab(notebook, "Raises & Bonuses", "raises_bonuses", fields, columns, buttons)
+        self._wire_raises_form_behaviors()
 
     def _build_admin_tab(self, notebook):
         """Build the Admin tab and its controls."""
@@ -553,6 +801,7 @@ class EmployeeBenefitsApp:
             ("Deactivate", lambda: self._set_employee_active(False)),
             ("Import", lambda: self._import_records("admin")),
             ("Export", lambda: self._export_records("admin")),
+            ("Template", lambda: self._export_template("admin")),
         ]
         self._add_tab(notebook, "Admin", "admin", fields, columns, buttons)
 
@@ -795,11 +1044,15 @@ class EmployeeBenefitsApp:
             return (
                 record["employee_name"],
                 record["change_type"],
-                f"{record['amount']:.2f}",
-                f"{record['bonus_percent'] * 100:.2f}%",
                 record["effective_date"],
-                f"{record['calculated_value']:.2f}",
-                record["notes"],
+                f"{record['hourly_from_amount']:.2f}",
+                f"{record['hourly_to_amount']:.2f}",
+                f"{record['yearly_from_amount']:.2f}",
+                f"{record['yearly_to_amount']:.2f}",
+                f"{record['yearly_difference']:.2f}",
+                f"{record['payroll_increase_percent']:.2f}%",
+                f"{record['bonus_amount']:.2f}",
+                f"{record['bonus_percent'] * 100:.2f}%",
             )
         if tab_key == "admin":
             remaining = self._remaining_time_off_hours(record["employee_name"])
@@ -853,8 +1106,14 @@ class EmployeeBenefitsApp:
         """Create and persist a new record from the tab form."""
         try:
             record = self._build_record_from_form(tab_key)
+            if tab_key == "time_off":
+                self._show_time_off_overlap_warning(record)
             record["id"] = uuid4().hex
+            if tab_key == "raises_bonuses":
+                record["applied_to_admin"] = False if record["change_type"] == "Raise" else True
             self.store[tab_key].append(record)
+            if tab_key == "raises_bonuses":
+                self._apply_pending_raises_to_admin()
             self._save_store()
             self._clear_form(tab_key, refresh=False)
             self._refresh_all_tabs()
@@ -872,12 +1131,18 @@ class EmployeeBenefitsApp:
         record_id = selected[0]
         try:
             updated = self._build_record_from_form(tab_key, ignore_id=record_id)
+            if tab_key == "time_off":
+                self._show_time_off_overlap_warning(updated, ignore_id=record_id)
             existing = self._find_record(tab_key, record_id)
             if not existing:
                 raise ValueError("The selected record no longer exists.")
             updated["id"] = existing["id"]
+            if tab_key == "raises_bonuses":
+                updated["applied_to_admin"] = False if updated["change_type"] == "Raise" else True
             index = self.store[tab_key].index(existing)
             self.store[tab_key][index] = updated
+            if tab_key == "raises_bonuses":
+                self._apply_pending_raises_to_admin()
             self._save_store()
             self._clear_form(tab_key, refresh=False)
             self._refresh_all_tabs()
@@ -931,11 +1196,12 @@ class EmployeeBenefitsApp:
 
         defaults = {
             "time_off": {"time_off_type": "Vacation"},
+            "performance": {"rating": "3"},
             "deductions": {
                 "deduction_type": "BCBS",
                 "employer_contribution": f"{self._get_setting_value('default_employer_contribution'):.2f}",
             },
-            "raises_bonuses": {"change_type": "Raise"},
+            "raises_bonuses": {"change_type": "Raise", "bonus_amount": "0.00", "bonus_percent": "0.00"},
             "admin": {
                 "pay_type": "Hourly",
                 "available_vacation_hours": f"{self._get_setting_value('default_vacation_hours'):.2f}",
@@ -946,6 +1212,8 @@ class EmployeeBenefitsApp:
             self._set_form_value(tab_key, key, value)
 
         tab.tree.selection_remove(tab.tree.selection())
+        if tab_key == "raises_bonuses":
+            self._sync_raises_form_rates(source="type")
         if refresh:
             self._refresh_tab(tab_key)
 
@@ -1030,48 +1298,16 @@ class EmployeeBenefitsApp:
             }
 
         if tab_key == "raises_bonuses":
-            employee_name = values["employee_name"]
-            if not employee_name:
-                raise ValueError("Employee Name is required.")
-            effective_date = parse_date(values["effective_date"], "Effective Date", required=True)
-            change_type = values["change_type"] or "Raise"
-            amount = as_float(values["amount"] or "0", "Amount")
-            bonus_percent = as_float(values["bonus_percent"] or "0", "Bonus Percent")
-            if bonus_percent > 1:
-                bonus_percent = bonus_percent / 100
-            if amount < 0 or bonus_percent < 0:
-                raise ValueError("Amount and Bonus Percent cannot be negative.")
-
-            admin_record = self._get_admin_record(employee_name)
-            if not admin_record:
-                raise ValueError("Employee must be in Admin tab before adding raises or bonuses.")
-            annual_pay = annualized_pay(admin_record["pay_type"], admin_record["pay"])
-
-            if change_type == "Raise":
-                if amount <= 0:
-                    raise ValueError("Raise Amount must be greater than 0.")
-                calculated_value = round(
-                    (
-                        amount * Employee.REG_HOURS
-                        + amount * Employee.OVERTIME_MULTIPLIER * Employee.OT_HOURS
-                    )
-                    * Employee.WEEKS,
-                    2,
-                )
-            else:
-                if bonus_percent <= 0:
-                    raise ValueError("Bonus Percent must be greater than 0 for Bonus type.")
-                calculated_value = round(annual_pay * bonus_percent, 2)
-
-            return {
-                "employee_name": employee_name,
-                "change_type": change_type,
-                "amount": round(amount, 2),
-                "bonus_percent": round(bonus_percent, 6),
-                "effective_date": effective_date.strftime(DATE_FORMAT),
-                "calculated_value": calculated_value,
-                "notes": values["notes"],
-            }
+            return self._build_raise_bonus_record(
+                employee_name=values["employee_name"],
+                change_type=values["change_type"] or "Raise",
+                effective_date_text=values["effective_date"],
+                hourly_to_text=values["hourly_to_amount"],
+                yearly_to_text=values["yearly_to_amount"],
+                bonus_amount_text=values["bonus_amount"],
+                bonus_percent_text=values["bonus_percent"],
+                notes=values["notes"],
+            )
 
         if tab_key == "admin":
             employee_name = values["employee_name"]
@@ -1110,11 +1346,85 @@ class EmployeeBenefitsApp:
 
     def _get_admin_record(self, employee_name):
         """Return admin record matching employee name, if present."""
-        target = employee_name.casefold()
-        for row in self.store["admin"]:
-            if normalize_text(row.get("employee_name", "")).casefold() == target:
-                return row
-        return None
+        return self._find_admin_record(self.store["admin"], employee_name)
+
+    def _build_raise_bonus_record(
+        self,
+        *,
+        employee_name,
+        change_type,
+        effective_date_text,
+        hourly_to_text,
+        yearly_to_text,
+        bonus_amount_text,
+        bonus_percent_text,
+        notes,
+    ):
+        """Build a normalized raise/bonus record from provided source values."""
+        employee_name = normalize_text(employee_name)
+        if not employee_name:
+            raise ValueError("Employee Name is required.")
+        admin_record = self._get_admin_record(employee_name)
+        if not admin_record:
+            raise ValueError("Employee must be in Admin tab before adding raises or bonuses.")
+
+        effective_date = parse_date(effective_date_text, "Effective Date", required=True)
+        change_type = "Bonus" if normalize_text(change_type) == "Bonus" else "Raise"
+        pay_type = normalize_text(admin_record.get("pay_type", "Hourly")) or "Hourly"
+        hourly_from, yearly_from = self._compensation_snapshot(admin_record)
+
+        hourly_to_input = as_float(hourly_to_text or "0", "Hourly To Amount")
+        yearly_to_input = as_float(yearly_to_text or "0", "Yearly To Amount")
+        bonus_amount = as_float(bonus_amount_text or "0", "Bonus Amount")
+        bonus_percent = as_float(bonus_percent_text or "0", "Bonus %")
+        if bonus_percent > 1:
+            bonus_percent = bonus_percent / 100
+
+        if any(value < 0 for value in (hourly_to_input, yearly_to_input, bonus_amount, bonus_percent)):
+            raise ValueError("Raise/bonus values cannot be negative.")
+
+        if change_type == "Raise":
+            if yearly_to_input <= 0 and hourly_to_input <= 0:
+                raise ValueError("Raise requires Hourly To Amount or Yearly To Amount.")
+            if pay_type == "Hourly":
+                yearly_to_amount = yearly_to_input if yearly_to_input > 0 else annualized_pay("Hourly", hourly_to_input)
+            else:
+                yearly_to_amount = yearly_to_input if yearly_to_input > 0 else hourly_to_input
+            if yearly_to_amount < yearly_from:
+                raise ValueError("Raise Yearly To Amount must be greater than or equal to Yearly From Amount.")
+            bonus_amount = 0.0
+            bonus_percent = 0.0
+        else:
+            if bonus_amount <= 0 and bonus_percent <= 0:
+                raise ValueError("Bonus requires Bonus Amount or Bonus %.")
+            if bonus_amount <= 0:
+                bonus_amount = round(yearly_from * bonus_percent, 2)
+            if bonus_percent <= 0:
+                bonus_percent = 0.0 if yearly_from <= 0 else bonus_amount / yearly_from
+            yearly_to_amount = round(yearly_from + bonus_amount, 2)
+
+        yearly_difference = round(yearly_to_amount - yearly_from, 2)
+        hourly_to_amount = (
+            round(hourly_to_input, 2)
+            if pay_type == "Hourly" and hourly_to_input > 0
+            else hourly_rate_from_annual(yearly_to_amount)
+        )
+        payroll_increase_percent = 0.0 if yearly_from <= 0 else round((yearly_difference / yearly_from) * 100, 4)
+
+        return {
+            "employee_name": employee_name,
+            "change_type": change_type,
+            "effective_date": effective_date.strftime(DATE_FORMAT),
+            "hourly_from_amount": round(hourly_from, 2),
+            "hourly_to_amount": round(hourly_to_amount, 2),
+            "yearly_from_amount": round(yearly_from, 2),
+            "yearly_to_amount": round(yearly_to_amount, 2),
+            "yearly_difference": yearly_difference,
+            "payroll_increase_percent": payroll_increase_percent,
+            "bonus_amount": round(bonus_amount, 2),
+            "bonus_percent": round(bonus_percent, 6),
+            "notes": normalize_text(notes),
+        }
 
     def _remaining_time_off_hours(self, employee_name, exclude_record_id=None):
         """Calculate remaining vacation and sick hours for current year."""
@@ -1158,6 +1468,38 @@ class EmployeeBenefitsApp:
         if time_off_record["time_off_type"] == "Sick" and remaining["sick"] - requested_hours < 0:
             raise ValueError("Not enough Available Sick Hours for this request.")
 
+    def _find_time_off_conflicts(self, time_off_record, ignore_id=None):
+        """Find existing time-off rows that overlap with the supplied date range."""
+        employee_name = normalize_text(time_off_record["employee_name"]).casefold()
+        start = parse_date(time_off_record["start_date"], "Start Date", required=True)
+        end = parse_date(time_off_record["end_date"], "End Date", required=True)
+        overlaps = []
+        for row in self.store["time_off"]:
+            if ignore_id and row.get("id") == ignore_id:
+                continue
+            if normalize_text(row.get("employee_name", "")).casefold() != employee_name:
+                continue
+            existing_start = parse_date(row.get("start_date", ""), "Start Date", required=True)
+            existing_end = parse_date(row.get("end_date", ""), "End Date", required=True)
+            if start <= existing_end and end >= existing_start:
+                overlaps.append(row)
+        return overlaps
+
+    def _show_time_off_overlap_warning(self, time_off_record, ignore_id=None):
+        """Warn when an employee already has scheduled time off in the same period."""
+        overlaps = self._find_time_off_conflicts(time_off_record, ignore_id=ignore_id)
+        if not overlaps:
+            return
+        first = overlaps[0]
+        messagebox.showwarning(
+            "Time Off Overlap",
+            (
+                f"{time_off_record['employee_name']} already has time off from "
+                f"{first['start_date']} to {first['end_date']}."
+            ),
+            parent=self.root,
+        )
+
     def _import_records(self, tab_key):
         """Import tab records from CSV/XLSX with per-row validation."""
         path = filedialog.askopenfilename(
@@ -1178,6 +1520,8 @@ class EmployeeBenefitsApp:
                 except ValueError as row_error:
                     LOGGER.warning("Rejected import row for %s: %s", tab_key, row_error)
                     rejected += 1
+            if tab_key == "raises_bonuses":
+                self._apply_pending_raises_to_admin()
             self._save_store()
             self._refresh_all_tabs()
             messagebox.showinfo("Import complete", f"Imported {imported} row(s). Rejected {rejected} row(s).", parent=self.root)
@@ -1286,40 +1630,19 @@ class EmployeeBenefitsApp:
 
     def _build_import_raises(self, row):
         """Build and validate one imported Raise/Bonus record."""
-        employee_name = normalize_text(row.get("Employee Name", ""))
-        change_type = normalize_text(row.get("Type", "Raise")) or "Raise"
-        amount = as_float(row.get("Amount", "0"), "Amount")
-        bonus_percent = as_float(row.get("Bonus Percent", "0"), "Bonus Percent")
-        if bonus_percent > 1:
-            bonus_percent = bonus_percent / 100
-        effective_date = parse_date(row.get("Effective Date", ""), "Effective Date", required=True)
-        if not employee_name:
-            raise ValueError("Raises import row missing Employee Name.")
-        admin_record = self._get_admin_record(employee_name)
-        if not admin_record:
-            raise ValueError("Employee must exist in Admin before importing Raise/Bonus.")
-        annual_pay = annualized_pay(admin_record["pay_type"], admin_record["pay"])
-        if change_type == "Raise":
-            calculated_value = round(
-                (
-                    amount * Employee.REG_HOURS
-                    + amount * Employee.OVERTIME_MULTIPLIER * Employee.OT_HOURS
-                )
-                * Employee.WEEKS,
-                2,
-            )
-        else:
-            calculated_value = round(annual_pay * bonus_percent, 2)
-        return {
-            "id": uuid4().hex,
-            "employee_name": employee_name,
-            "change_type": change_type,
-            "amount": round(amount, 2),
-            "bonus_percent": round(bonus_percent, 6),
-            "effective_date": effective_date.strftime(DATE_FORMAT),
-            "calculated_value": calculated_value,
-            "notes": normalize_text(row.get("Notes", "")),
-        }
+        record = self._build_raise_bonus_record(
+            employee_name=row.get("Employee Name", ""),
+            change_type=row.get("Type", "Raise"),
+            effective_date_text=row.get("Effective Date", ""),
+            hourly_to_text=row.get("Hourly To Amount", row.get("Hourly To", "0")),
+            yearly_to_text=row.get("Yearly To Amount", row.get("Yearly To", "0")),
+            bonus_amount_text=row.get("Bonus Amount", "0"),
+            bonus_percent_text=row.get("Bonus %", row.get("Bonus Percent", "0")),
+            notes=row.get("Notes", ""),
+        )
+        record["id"] = uuid4().hex
+        record["applied_to_admin"] = False if record["change_type"] == "Raise" else True
+        return record
 
     def _build_import_admin(self, row):
         """Build and validate one imported Admin record."""
@@ -1371,6 +1694,63 @@ class EmployeeBenefitsApp:
         except (OSError, ValueError) as error:
             LOGGER.warning("Export failed for %s: %s", tab_key, error)
             messagebox.showerror("Export failed", str(error), parent=self.root)
+
+    def _export_template(self, tab_key):
+        """Export an empty CSV/XLSX template with tab import headers."""
+        path = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Export template",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("Excel files", "*.xlsx")],
+        )
+        if not path:
+            return
+        try:
+            headers = self._template_headers(tab_key)
+            self._write_rows(path, headers, [])
+            messagebox.showinfo("Template complete", "Template exported.", parent=self.root)
+        except (OSError, ValueError) as error:
+            LOGGER.warning("Template export failed for %s: %s", tab_key, error)
+            messagebox.showerror("Template export failed", str(error), parent=self.root)
+
+    def _template_headers(self, tab_key):
+        """Return template headers for one tab."""
+        header_map = {
+            "time_off": ["Employee Name", "Type", "Start Date", "End Date", "Notes"],
+            "performance": ["Employee Name", "Review Date", "Rating", "Summary", "Notes"],
+            "deductions": [
+                "Employee Name",
+                "Type",
+                "Monthly Amount",
+                "Employer Contribution",
+                "Start Date",
+                "Notes",
+            ],
+            "raises_bonuses": [
+                "Employee Name",
+                "Type",
+                "Effective Date",
+                "Hourly To Amount",
+                "Yearly To Amount",
+                "Bonus Amount",
+                "Bonus %",
+                "Notes",
+            ],
+            "admin": [
+                "Employee Name",
+                "Hire Date",
+                "Termination Date",
+                "Pay Type",
+                "Pay",
+                "Available Vacation (Hours)",
+                "Available Sick (Hours)",
+                "Active",
+                "Notes",
+            ],
+        }
+        if tab_key not in header_map:
+            raise ValueError(f"Template not supported for tab key: {tab_key}")
+        return header_map[tab_key]
 
     def _rows_for_export(self, tab_key):
         """Return export headers and rows for the specified tab."""
@@ -1429,15 +1809,33 @@ class EmployeeBenefitsApp:
             return headers, rows
 
         if tab_key == "raises_bonuses":
-            headers = ["Employee Name", "Type", "Amount", "Bonus Percent", "Effective Date", "Calculated Value", "Notes"]
+            headers = [
+                "Employee Name",
+                "Type",
+                "Effective Date",
+                "Hourly From Amount",
+                "Hourly To Amount",
+                "Yearly From Amount",
+                "Yearly To Amount",
+                "Yearly Difference",
+                "% Increase In Payroll",
+                "Bonus Amount",
+                "Bonus %",
+                "Notes",
+            ]
             rows = [
                 {
                     "Employee Name": row["employee_name"],
                     "Type": row["change_type"],
-                    "Amount": f"{row['amount']:.2f}",
-                    "Bonus Percent": f"{row['bonus_percent'] * 100:.2f}",
                     "Effective Date": row["effective_date"],
-                    "Calculated Value": f"{row['calculated_value']:.2f}",
+                    "Hourly From Amount": f"{row['hourly_from_amount']:.2f}",
+                    "Hourly To Amount": f"{row['hourly_to_amount']:.2f}",
+                    "Yearly From Amount": f"{row['yearly_from_amount']:.2f}",
+                    "Yearly To Amount": f"{row['yearly_to_amount']:.2f}",
+                    "Yearly Difference": f"{row['yearly_difference']:.2f}",
+                    "% Increase In Payroll": f"{row['payroll_increase_percent']:.2f}",
+                    "Bonus Amount": f"{row['bonus_amount']:.2f}",
+                    "Bonus %": f"{row['bonus_percent'] * 100:.2f}",
                     "Notes": row["notes"],
                 }
                 for row in self.store["raises_bonuses"]
@@ -1594,41 +1992,32 @@ class EmployeeBenefitsApp:
     def _calculate_yearly_totals(self):
         """Compute payroll, raises/bonuses, and time-off totals by year."""
         totals = {}
+        def ensure_year(year):
+            totals.setdefault(year, {"payroll": 0.0, "raises_bonuses": 0.0, "time_off_days": 0.0})
+
         current_year = str(date.today().year)
-        payroll_total = sum(
-            annualized_pay(row["pay_type"], float(row["pay"]))
-            for row in self.store["admin"]
-            if row.get("active", True)
+        ensure_year(current_year)
+        totals[current_year]["payroll"] = round(
+            sum(
+                annualized_pay(row["pay_type"], float(row["pay"]))
+                for row in self.store["admin"]
+                if row.get("active", True)
+            ),
+            2,
         )
-        totals[current_year] = {
-            "payroll": round(payroll_total, 2),
-            "raises_bonuses": 0.0,
-            "time_off_days": 0.0,
-        }
 
         for row in self.store["raises_bonuses"]:
             year = str(record_year(row["effective_date"]))
-            if year not in totals:
-                totals[year] = {"payroll": 0.0, "raises_bonuses": 0.0, "time_off_days": 0.0}
-            totals[year]["raises_bonuses"] += float(row["calculated_value"])
+            ensure_year(year)
+            totals[year]["raises_bonuses"] += float(row.get("yearly_difference", row.get("calculated_value", 0.0)))
 
         for row in self.store["time_off"]:
             year = str(record_year(row["start_date"]))
-            if year not in totals:
-                totals[year] = {"payroll": 0.0, "raises_bonuses": 0.0, "time_off_days": 0.0}
+            ensure_year(year)
             totals[year]["time_off_days"] += float(row["duration_days"])
-
-        persisted = self.store.get("yearly_totals", {})
-        for year, values in persisted.items():
-            if year not in totals:
-                totals[year] = {
-                    "payroll": float(values.get("payroll", 0.0)),
-                    "raises_bonuses": float(values.get("raises_bonuses", 0.0)),
-                    "time_off_days": float(values.get("time_off_days", 0.0)),
-                }
-            else:
-                if totals[year]["payroll"] == 0.0:
-                    totals[year]["payroll"] = float(values.get("payroll", 0.0))
+        for metrics in totals.values():
+            metrics["raises_bonuses"] = round(metrics["raises_bonuses"], 2)
+            metrics["time_off_days"] = round(metrics["time_off_days"], 2)
         return totals
 
     def _refresh_chart_summary(self):
@@ -1644,7 +2033,7 @@ class EmployeeBenefitsApp:
         for year in sorted(yearly_totals.keys(), key=int):
             metrics = yearly_totals[year]
             tree.insert("", "end", values=(year, "Payroll", "Total Annual Active Payroll", f"{metrics['payroll']:,.2f}"))
-            tree.insert("", "end", values=(year, "Raises & Bonuses", "Total Calculated Amount", f"{metrics['raises_bonuses']:,.2f}"))
+            tree.insert("", "end", values=(year, "Raises & Bonuses", "Total Yearly Difference", f"{metrics['raises_bonuses']:,.2f}"))
             tree.insert("", "end", values=(year, "Time Off", "Total Scheduled Days", f"{metrics['time_off_days']:,.2f}"))
 
     def _launch_chart(self):
@@ -1695,7 +2084,7 @@ class EmployeeBenefitsApp:
         plt.plot(years, values, marker="o", color="#2ca02c")
         plt.title("Raises & Bonuses by Year")
         plt.xlabel("Year")
-        plt.ylabel("Total Raises & Bonuses")
+        plt.ylabel("Total Yearly Difference")
         plt.tight_layout()
         plt.show()
 

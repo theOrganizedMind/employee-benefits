@@ -157,3 +157,88 @@ def test_annual_reset_uses_settings_values(app):
     for row in instance.store["admin"]:
         assert row["available_vacation_hours"] == 88.0
         assert row["available_sick_hours"] == 44.0
+
+
+def test_hourly_compensation_snapshot_normalizes_legacy_annual_value(app):
+    """Hourly snapshot should treat legacy annualized values as hourly-derived pay."""
+    instance, _root = app
+    admin_record = instance.store["admin"][0]
+    admin_record["pay_type"] = "Hourly"
+    admin_record["pay"] = 85800.0
+
+    hourly_from, yearly_from = instance._compensation_snapshot(admin_record)
+    assert hourly_from == 30.0
+    assert yearly_from == 85800.0
+
+
+def test_raises_form_hourly_to_syncs_yearly_to(app):
+    """Hourly To Amount should drive Yearly To Amount via Employee constants."""
+    instance, root = app
+    admin_record = instance.store["admin"][0]
+    admin_record["pay_type"] = "Hourly"
+    admin_record["pay"] = 30.0
+    employee_name = admin_record["employee_name"]
+
+    form = instance.tabs["raises_bonuses"].form_vars
+    form["employee_name"].set(employee_name)
+    root.update_idletasks()
+    assert form["hourly_from_amount"].get() == "30.00"
+    assert form["yearly_from_amount"].get() == "85800.00"
+
+    form["hourly_to_amount"].set("31")
+    root.update_idletasks()
+    assert form["yearly_to_amount"].get() == "88660.00"
+
+
+def test_migrate_preserves_existing_raise_from_to_values(app):
+    """Schema migration should not overwrite existing persisted raise from/to values."""
+    instance, _root = app
+    admin_row = instance.store["admin"][0]
+    admin_row["pay_type"] = "Hourly"
+    admin_row["pay"] = 30.0
+    instance.store["raises_bonuses"] = [
+        {
+            "id": "r1",
+            "employee_name": admin_row["employee_name"],
+            "change_type": "Raise",
+            "effective_date": "2026-03-01",
+            "hourly_from_amount": 28.0,
+            "hourly_to_amount": 30.0,
+            "yearly_from_amount": 80080.0,
+            "yearly_to_amount": 85800.0,
+            "yearly_difference": 5720.0,
+            "payroll_increase_percent": 7.1429,
+            "bonus_amount": 0.0,
+            "bonus_percent": 0.0,
+            "notes": "",
+        }
+    ]
+
+    instance._migrate_store(instance.store)
+    raise_row = instance.store["raises_bonuses"][0]
+    assert raise_row["hourly_from_amount"] == 28.0
+    assert raise_row["hourly_to_amount"] == 30.0
+    assert raise_row["yearly_difference"] == 5720.0
+
+
+def test_add_due_raise_updates_admin_pay(app):
+    """Adding a due raise should automatically update Admin pay."""
+    instance, _root = app
+    admin_row = instance.store["admin"][0]
+    admin_row["pay_type"] = "Hourly"
+    admin_row["pay"] = 28.0
+    employee_name = admin_row["employee_name"]
+
+    form = instance.tabs["raises_bonuses"].form_vars
+    form["employee_name"].set(employee_name)
+    form["change_type"].set("Raise")
+    form["effective_date"].set(eb.date.today().strftime("%Y-%m-%d"))
+    form["hourly_to_amount"].set("30")
+    form["yearly_to_amount"].set("")
+    form["bonus_amount"].set("0")
+    form["bonus_percent"].set("0")
+    form["notes"].set("")
+
+    instance._add_record("raises_bonuses")
+    updated_admin = instance._get_admin_record(employee_name)
+    assert updated_admin["pay"] == 30.0

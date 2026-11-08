@@ -12,9 +12,11 @@ deductions, raises/bonuses, reminders, and charts.
   insurance calculations.
 - **json_files/employee_details.json**: Private employee configuration used
   when it exists.
-- **employee_details.json**: Public fallback employee configuration.
+- **employee_details_public.json**: Public fallback employee configuration.
 - **json_files/employee_benefits_records.json**: Persistent GUI data store for
-  app records and settings.
+  app records and settings (private).
+- **employee_benefits_records_public.json**: Public fallback records store used
+  when private records are unavailable.
 - **payroll.py**: Standalone payroll totals example using its employee map.
 - **tests/test_employee_benefits.py**: Pytest unit and GUI interaction tests.
 - **requirements.txt**: Dependency list (includes `pytest`, `matplotlib`,
@@ -49,24 +51,26 @@ The GUI includes these tabs:
 - **Time Off**
   - Track Vacation, Sick, and Not Paid requests
   - Automatically calculate duration from Start/End dates
+  - Warn when new requests overlap existing time off for the same employee
   - Group/sort by Year and Employee Name
-  - Import/export CSV and XLSX
+  - Import/export CSV and XLSX, plus downloadable templates
 - **Performance**
   - Track review date, rating, summary, and notes
-  - Import/export CSV and XLSX
+  - Uses a 1-5 rating dropdown
+  - Import/export CSV and XLSX, plus downloadable templates
 - **Deductions**
   - Track BCBS, Loan, and Child Support deductions
   - Weekly deduction formula:
     `(Monthly Amount - Employer Contribution) / 4`
-  - Import/export CSV and XLSX
+  - Import/export CSV and XLSX, plus downloadable templates
 - **Raises & Bonuses**
-  - Track Raise and Bonus records with effective dates
-  - Uses payroll-based calculation logic
-  - Import/export CSV and XLSX
+  - Track Raise and Bonus records with from/to compensation and yearly deltas
+  - Auto-populates From amounts from selected employee compensation
+  - Import/export CSV and XLSX, plus downloadable templates
 - **Admin**
   - Manage employee hire/termination, pay type/pay, status, and notes
   - Track available vacation/sick hours and active/inactive status
-  - Import/export CSV and XLSX
+  - Import/export CSV and XLSX, plus downloadable templates
 - **Settings**
   - Configure preset defaults:
     - Default Vacation Hours
@@ -79,7 +83,7 @@ The GUI includes these tabs:
 - **Charts**
   - Launch standalone matplotlib charts (outside table view)
   - Includes payroll, raises/bonuses, deductions, and time-off Gantt
-  - Tracks yearly totals for payroll, raises/bonuses, and time off
+  - Tracks yearly totals for payroll, raises/bonuses yearly differences, and time off
 
 Employee name fields use autosuggest after at least 5 typed characters.
 Date fields use `tkcalendar` when available, with `YYYY-MM-DD` entry fallback.

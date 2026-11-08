@@ -1,0 +1,129 @@
+{
+  "meta": {
+    "last_annual_reset_year": "2026"
+  },
+  "settings": {
+    "default_vacation_hours": 80.0,
+    "default_sick_hours": 40.0,
+    "default_employer_contribution": 300.0
+  },
+  "yearly_totals": {
+    "2026": {
+      "payroll": 216430.0,
+      "raises_bonuses": 7604.0,
+      "time_off_days": 5.0
+    }
+  },
+  "admin": [
+    {
+      "id": "f86d6f6c034b47a39f5dbadf2cf66111",
+      "employee_name": "Ava Thompson",
+      "hire_date": "2022-05-01",
+      "termination_date": "",
+      "pay_type": "Salary",
+      "pay": 72000.0,
+      "available_vacation_hours": 80.0,
+      "available_sick_hours": 40.0,
+      "notes": "",
+      "active": true
+    },
+    {
+      "id": "56fb1f613e93477398dc5d46a0d7c442",
+      "employee_name": "Noah Carter",
+      "hire_date": "2021-09-15",
+      "termination_date": "",
+      "pay_type": "Hourly",
+      "pay": 28.0,
+      "available_vacation_hours": 80.0,
+      "available_sick_hours": 40.0,
+      "notes": "",
+      "active": true
+    },
+    {
+      "id": "be8263b4620747689a40618f4d5fdd56",
+      "employee_name": "Mia Brooks",
+      "hire_date": "2024-01-10",
+      "termination_date": "",
+      "pay_type": "Hourly",
+      "pay": 22.5,
+      "available_vacation_hours": 80.0,
+      "available_sick_hours": 40.0,
+      "notes": "",
+      "active": true
+    }
+  ],
+  "time_off": [
+    {
+      "id": "d6f4f9785e06498f8f6cb4f71e92a5cf",
+      "employee_name": "Noah Carter",
+      "time_off_type": "Vacation",
+      "start_date": "2026-07-01",
+      "end_date": "2026-07-03",
+      "duration_days": 3,
+      "notes": "Family trip"
+    },
+    {
+      "id": "7028318e9f1f4366af7d91f7de4ecf1f",
+      "employee_name": "Mia Brooks",
+      "time_off_type": "Sick",
+      "start_date": "2026-08-18",
+      "end_date": "2026-08-19",
+      "duration_days": 2,
+      "notes": "Medical leave"
+    }
+  ],
+  "performance": [
+    {
+      "id": "65711bfa94474fdca8cb6f08fd7381d7",
+      "employee_name": "Ava Thompson",
+      "review_date": "2026-03-15",
+      "rating": 4,
+      "summary": "Exceeds expectations",
+      "notes": ""
+    }
+  ],
+  "deductions": [
+    {
+      "id": "9bcf9a289f074b8f8420c7bce92ef7dc",
+      "employee_name": "Noah Carter",
+      "deduction_type": "BCBS",
+      "monthly_amount": 525.0,
+      "employer_contribution": 300.0,
+      "weekly_deduction": 56.25,
+      "start_date": "2026-01-01",
+      "notes": ""
+    }
+  ],
+  "raises_bonuses": [
+    {
+      "id": "03df36eb635a4de7857297df38d8f8ed",
+      "employee_name": "Ava Thompson",
+      "change_type": "Raise",
+      "effective_date": "2026-02-01",
+      "hourly_from_amount": 25.17,
+      "hourly_to_amount": 26.43,
+      "yearly_from_amount": 72000.0,
+      "yearly_to_amount": 75600.0,
+      "yearly_difference": 3600.0,
+      "payroll_increase_percent": 5.0,
+      "bonus_amount": 0.0,
+      "bonus_percent": 0.0,
+      "notes": ""
+    },
+    {
+      "id": "f4de6eb7da9c489f86ea747fae00db23",
+      "employee_name": "Noah Carter",
+      "change_type": "Bonus",
+      "effective_date": "2026-06-15",
+      "hourly_from_amount": 28.0,
+      "hourly_to_amount": 29.4,
+      "yearly_from_amount": 80080.0,
+      "yearly_to_amount": 84084.0,
+      "yearly_difference": 4004.0,
+      "payroll_increase_percent": 5.0,
+      "bonus_amount": 4004.0,
+      "bonus_percent": 0.05,
+      "notes": "Performance bonus"
+    }
+  ]
+}
