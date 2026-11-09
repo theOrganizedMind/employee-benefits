@@ -4,7 +4,7 @@ import logging
 import os
 import tkinter as tk
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from tkinter import filedialog, messagebox, ttk
 from uuid import uuid4
 
@@ -189,6 +189,8 @@ class EmployeeBenefitsApp:
         self.settings_widgets = {}
         self.reminder_widgets = {}
         self.chart_widgets = {}
+        self.gantt_widgets = {}
+        self.gantt_rows = []
         self._apply_annual_reset_if_needed()
         self._build_ui()
         self._refresh_all_tabs()
@@ -417,6 +419,7 @@ class EmployeeBenefitsApp:
         """Create notebook tabs and all tab layouts."""
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        self.notebook = notebook
 
         self._build_time_off_tab(notebook)
         self._build_performance_tab(notebook)
@@ -425,7 +428,9 @@ class EmployeeBenefitsApp:
         self._build_admin_tab(notebook)
         self._build_reminders_tab(notebook)
         self._build_charts_tab(notebook)
+        self._build_gantt_tab(notebook)
         self._build_settings_tab(notebook)
+        notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
 
     def _get_setting_value(self, key, store=None):
         """Return a non-negative float setting value for the provided key."""
@@ -955,7 +960,7 @@ class EmployeeBenefitsApp:
         ttk.Combobox(
             form_frame,
             textvariable=chart_var,
-            values=["Payroll", "Raises and Bonuses", "Deductions", "Time Off Gantt"],
+            values=["Payroll", "Raises and Bonuses", "Deductions"],
             state="readonly",
             width=30,
         ).grid(row=0, column=1, sticky="w", padx=(0, 14), pady=4)
@@ -979,6 +984,260 @@ class EmployeeBenefitsApp:
 
         self.chart_widgets = {"tree": tree, "chart_var": chart_var}
 
+    def _build_gantt_tab(self, notebook):
+        """Build the Gantt Chart tab with timeline view and time-off detail tree."""
+        tab_frame = ttk.Frame(notebook)
+        notebook.add(tab_frame, text="Gantt Chart")
+        container = ttk.Frame(tab_frame, padding=10)
+        container.pack(fill="both", expand=True)
+
+        control_frame = ttk.LabelFrame(container, text="Timeline Controls")
+        control_frame.pack(fill="x", pady=(0, 8))
+
+        status_label = ttk.Label(
+            control_frame,
+            text="Time off timeline from start date to end date.",
+        )
+        status_label.grid(row=0, column=0, sticky="w", padx=6, pady=6)
+
+        ttk.Button(control_frame, text="Refresh Chart", command=self._refresh_gantt_tab).grid(
+            row=0,
+            column=1,
+            sticky="e",
+            padx=6,
+            pady=6,
+        )
+        control_frame.columnconfigure(0, weight=1)
+
+        chart_frame = ttk.LabelFrame(container, text="Gantt Chart View")
+        chart_frame.pack(fill="both", expand=True, pady=(0, 8))
+
+        gantt_canvas = tk.Canvas(
+            chart_frame,
+            background="#ffffff",
+            highlightthickness=0,
+        )
+        gantt_y_scroll = ttk.Scrollbar(chart_frame, orient="vertical", command=gantt_canvas.yview)
+        gantt_x_scroll = ttk.Scrollbar(chart_frame, orient="horizontal", command=gantt_canvas.xview)
+        gantt_canvas.configure(yscrollcommand=gantt_y_scroll.set, xscrollcommand=gantt_x_scroll.set)
+        gantt_canvas.grid(row=0, column=0, sticky="nsew")
+        gantt_y_scroll.grid(row=0, column=1, sticky="ns")
+        gantt_x_scroll.grid(row=1, column=0, sticky="ew")
+        chart_frame.rowconfigure(0, weight=1)
+        chart_frame.columnconfigure(0, weight=1)
+        gantt_canvas.bind("<Configure>", self._on_gantt_canvas_resize)
+
+        detail_frame = ttk.LabelFrame(container, text="Time Off")
+        detail_frame.pack(fill="both", expand=True)
+        columns = ("year", "employee_name", "time_off_type", "start_date", "end_date", "duration_days", "notes")
+        detail_tree = ttk.Treeview(detail_frame, columns=columns, show="headings", height=8)
+        detail_tree.heading("year", text="Year")
+        detail_tree.heading("employee_name", text="Employee Name")
+        detail_tree.heading("time_off_type", text="Type")
+        detail_tree.heading("start_date", text="Start Date")
+        detail_tree.heading("end_date", text="End Date")
+        detail_tree.heading("duration_days", text="Duration")
+        detail_tree.heading("notes", text="Notes")
+        detail_tree.column("year", width=80, anchor="center")
+        detail_tree.column("employee_name", width=190, anchor="w")
+        detail_tree.column("time_off_type", width=95, anchor="center")
+        detail_tree.column("start_date", width=105, anchor="center")
+        detail_tree.column("end_date", width=105, anchor="center")
+        detail_tree.column("duration_days", width=90, anchor="center")
+        detail_tree.column("notes", width=300, anchor="w")
+        detail_scroll = ttk.Scrollbar(detail_frame, orient="vertical", command=detail_tree.yview)
+        detail_tree.configure(yscrollcommand=detail_scroll.set)
+        detail_tree.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        detail_scroll.grid(row=0, column=1, sticky="ns", pady=6)
+        detail_frame.rowconfigure(0, weight=1)
+        detail_frame.columnconfigure(0, weight=1)
+
+        self.gantt_widgets = {
+            "tab_frame": tab_frame,
+            "status_label": status_label,
+            "canvas": gantt_canvas,
+            "tree": detail_tree,
+        }
+
+    def _build_time_off_gantt_rows(self):
+        """Build normalized rows for records overlapping the next 30 days."""
+        window_start = date.today()
+        window_end = window_start + timedelta(days=29)
+        rows = sorted(
+            self.store["time_off"],
+            key=lambda item: (
+                record_year(item["start_date"]) or 0,
+                normalize_text(item["employee_name"]).casefold(),
+                item["start_date"],
+            ),
+        )
+        prepared = []
+        for row in rows:
+            start = parse_date(row["start_date"], "Start Date", required=True)
+            end = parse_date(row["end_date"], "End Date", required=True)
+            duration = calculate_duration_days(start, end)
+            if end < window_start or start > window_end:
+                continue
+            chart_start = max(start, window_start)
+            chart_end = min(end, window_end)
+            prepared.append(
+                {
+                    "year": str(start.year),
+                    "employee_name": row["employee_name"],
+                    "time_off_type": row["time_off_type"],
+                    "start_date": row["start_date"],
+                    "end_date": row["end_date"],
+                    "notes": row["notes"],
+                    "start": start,
+                    "end": end,
+                    "chart_start": chart_start,
+                    "chart_end": chart_end,
+                    "chart_duration": calculate_duration_days(chart_start, chart_end),
+                    "duration": duration,
+                }
+            )
+        return prepared
+
+    def _populate_gantt_time_off_tree(self):
+        """Populate the Time Off detail tree under the Gantt chart."""
+        tree = self.gantt_widgets["tree"]
+        tree.delete(*tree.get_children())
+        for row in self.gantt_rows:
+            tree.insert(
+                "",
+                tk.END,
+                values=(
+                    row["year"],
+                    row["employee_name"],
+                    row["time_off_type"],
+                    row["start_date"],
+                    row["end_date"],
+                    row["duration"],
+                    row["notes"],
+                ),
+            )
+
+    def _draw_time_off_gantt_chart(self):
+        """Render the Gantt canvas with one daily tick for the next 30 days."""
+        canvas = self.gantt_widgets["canvas"]
+        canvas.delete("all")
+        window_start = date.today()
+        window_end = window_start + timedelta(days=29)
+        total_days = 30
+        if not self.gantt_rows:
+            canvas.create_text(
+                200,
+                80,
+                text=f"No time off rows in the next 30 days ({window_start.isoformat()} to {window_end.isoformat()}).",
+                fill="#444444",
+                font=("Segoe UI", 11),
+                anchor="w",
+            )
+            canvas.configure(scrollregion=(0, 0, 800, 220))
+            return
+
+        canvas_width = max(900, int(canvas.winfo_width()))
+        left_margin = 265
+        right_margin = 65
+        top_margin = 56
+        row_height = 28
+        min_plot_width = total_days * 42
+        plot_width = max(520, min_plot_width, canvas_width - left_margin - right_margin)
+        plot_end_x = left_margin + plot_width
+        content_height = top_margin + (len(self.gantt_rows) * row_height) + 40
+
+        for day_offset in range(total_days):
+            ratio = day_offset / max(1, total_days - 1)
+            x = left_margin + int(plot_width * ratio)
+            tick_date = window_start + timedelta(days=day_offset)
+            canvas.create_line(x, top_margin - 20, x, content_height - 20, fill="#dddddd")
+            canvas.create_text(
+                x,
+                top_margin - 28,
+                text=tick_date.isoformat(),
+                fill="#555555",
+                font=("Segoe UI", 9),
+                angle=45,
+            )
+
+        type_colors = {
+            "Vacation": "#1d4ed8",
+            "Sick": "#2a9d8f",
+            "Not Paid": "#6b7280",
+        }
+        for index, row in enumerate(self.gantt_rows):
+            y_top = top_margin + (index * row_height)
+            y_bottom = y_top + 18
+            y_mid = y_top + 9
+            start_offset = (row["chart_start"] - window_start).days
+            bar_days = row["chart_duration"]
+            x0 = left_margin + int((start_offset / total_days) * plot_width)
+            bar_width = max(2, int((bar_days / total_days) * plot_width))
+            x1 = min(plot_end_x, x0 + bar_width)
+            bar_color = type_colors.get(row["time_off_type"], "#ff7f0e")
+            canvas.create_rectangle(x0, y_top, x1, y_bottom, fill=bar_color, outline="")
+            canvas.create_text(
+                10,
+                y_mid,
+                anchor="w",
+                text=f"{row['employee_name']} ({row['time_off_type']})",
+                font=("Segoe UI", 9),
+                fill="#222222",
+            )
+            canvas.create_text(
+                plot_end_x + 8,
+                y_mid,
+                anchor="w",
+                text=f"{row['chart_duration']}d",
+                font=("Segoe UI", 9),
+                fill="#333333",
+            )
+
+        canvas.configure(scrollregion=(0, 0, plot_end_x + 95, content_height))
+
+    def _on_gantt_canvas_resize(self, _event):
+        """Redraw gantt chart when canvas dimensions change."""
+        if self.gantt_rows:
+            self._draw_time_off_gantt_chart()
+
+    def _refresh_gantt_tab(self):
+        """Reload Gantt tab rows and redraw canvas + detail tree."""
+        if not self.gantt_widgets:
+            return
+        try:
+            self.gantt_rows = self._build_time_off_gantt_rows()
+        except ValueError as error:
+            self.gantt_rows = []
+            self.gantt_widgets["status_label"].config(text="Unable to load time off data for Gantt chart.")
+            messagebox.showerror("Gantt Chart", str(error), parent=self.root)
+            self._populate_gantt_time_off_tree()
+            self._draw_time_off_gantt_chart()
+            return
+
+        self._populate_gantt_time_off_tree()
+        self._draw_time_off_gantt_chart()
+        if not self.gantt_rows:
+            today = date.today()
+            self.gantt_widgets["status_label"].config(
+                text=f"No time off rows in the next 30 days ({today.isoformat()} to {(today + timedelta(days=29)).isoformat()})."
+            )
+            return
+        today = date.today()
+        self.gantt_widgets["status_label"].config(
+            text=(
+                f"Showing {len(self.gantt_rows)} time off row(s) from "
+                f"{today.isoformat()} to {(today + timedelta(days=29)).isoformat()}."
+            )
+        )
+
+    def _on_notebook_tab_changed(self, _event):
+        """Refresh heavy visual tabs when selected."""
+        if not self.gantt_widgets:
+            return
+        selected = self.notebook.select()
+        if selected == str(self.gantt_widgets["tab_frame"]):
+            self._refresh_gantt_tab()
+
     def _refresh_all_tabs(self):
         """Refresh all treeviews and computed dashboard sections."""
         self._refresh_tab("time_off")
@@ -988,6 +1247,7 @@ class EmployeeBenefitsApp:
         self._refresh_tab("admin")
         self._refresh_reminders()
         self._refresh_chart_summary()
+        self._refresh_gantt_tab()
 
     def _refresh_tab(self, tab_key, records=None):
         """Refresh one tab treeview with optional filtered records."""
@@ -2051,9 +2311,6 @@ class EmployeeBenefitsApp:
         if chart_type == "Deductions":
             self._launch_deductions_chart()
             return
-        if chart_type == "Time Off Gantt":
-            self._launch_time_off_gantt_chart()
-            return
         messagebox.showerror("Charts", "Unsupported chart type selected.", parent=self.root)
 
     def _launch_payroll_chart(self):
@@ -2104,46 +2361,6 @@ class EmployeeBenefitsApp:
         plt.title("Weekly Deductions by Type")
         plt.tight_layout()
         plt.show()
-
-    def _launch_time_off_gantt_chart(self):
-        """Launch a Gantt-style chart for scheduled employee time off."""
-        rows = sorted(
-            self.store["time_off"],
-            key=lambda item: (
-                record_year(item["start_date"]) or 0,
-                normalize_text(item["employee_name"]).casefold(),
-                item["start_date"],
-            ),
-        )
-        if not rows:
-            messagebox.showinfo("Charts", "No time off data available.", parent=self.root)
-            return
-        figure, axis = plt.subplots(figsize=(12, 7))
-        y_positions = []
-        y_labels = []
-        for index, row in enumerate(rows):
-            start = parse_date(row["start_date"], "Start Date", required=True)
-            end = parse_date(row["end_date"], "End Date", required=True)
-            duration = calculate_duration_days(start, end)
-            axis.barh(index, duration, left=start.toordinal(), color="#ff7f0e", edgecolor="black")
-            axis.text(
-                start.toordinal(),
-                index,
-                f" {row['employee_name']} ({row['time_off_type']})",
-                va="center",
-                fontsize=8,
-            )
-            y_positions.append(index)
-            y_labels.append(f"{record_year(row['start_date'])} - {row['employee_name']}")
-        axis.set_yticks(y_positions)
-        axis.set_yticklabels(y_labels)
-        axis.set_title("Employee Time Off Gantt Chart")
-        axis.set_xlabel("Date")
-        axis.xaxis_date()
-        figure.autofmt_xdate()
-        plt.tight_layout()
-        plt.show()
-
 
 def create_gui():
     """Create and run the tabbed employee benefits manager."""

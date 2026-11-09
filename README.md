@@ -2,7 +2,7 @@
 
 This project provides a tabbed Tkinter application for managing employee
 benefits and compensation data, including time off, performance reviews,
-deductions, raises/bonuses, reminders, and charts.
+deductions, raises/bonuses, reminders, charts, and a dedicated Gantt timeline view.
 
 ## Project Structure
 
@@ -82,8 +82,12 @@ The GUI includes these tabs:
   - Export reminder view to CSV/XLSX
 - **Charts**
   - Launch standalone matplotlib charts (outside table view)
-  - Includes payroll, raises/bonuses, deductions, and time-off Gantt
+  - Includes payroll, raises/bonuses, and deductions
   - Tracks yearly totals for payroll, raises/bonuses yearly differences, and time off
+- **Gantt Chart**
+  - Displays a dedicated Time Off Gantt timeline using an in-app canvas view
+  - Shows one daily tick across the next 30 days starting from today
+  - Includes a Time Off detail treeview below the chart
 
 Employee name fields use autosuggest after at least 5 typed characters.
 Date fields use `tkcalendar` when available, with `YYYY-MM-DD` entry fallback.
