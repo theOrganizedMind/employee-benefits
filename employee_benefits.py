@@ -271,6 +271,20 @@ class EmployeeBenefitsApp:
             row.setdefault("pay_type", "Hourly")
             row.setdefault("pay", 0.0)
 
+        for row in store["time_off"]:
+            row.setdefault("time_off_type", "Vacation")
+            row.setdefault("notes", "")
+            start_date = parse_date(row.get("start_date", ""), "Start Date")
+            end_date = parse_date(row.get("end_date", ""), "End Date")
+            if "duration_days" not in row:
+                row["duration_days"] = (
+                    calculate_duration_days(start_date, end_date)
+                    if start_date and end_date
+                    else 0
+                )
+            if "hours" not in row:
+                row["hours"] = round(float(row.get("duration_days", 0) or 0.0) * 8, 2)
+
         for row in store["deductions"]:
             if "monthly_amount" not in row and "amount" in row:
                 row["monthly_amount"] = row.get("amount", 0)
@@ -662,12 +676,13 @@ class EmployeeBenefitsApp:
         """Build the Time Off tab and its controls."""
         fields = [
             ("Employee Name", "employee_name", "employee_combo"),
-            ("Type", "time_off_type", "combo", ["Vacation", "Sick", "Not Paid"]),
+            ("Type", "time_off_type", "combo", ["", "Vacation", "Sick", "Not Paid"]),
             ("Start Date", "start_date", "date"),
             ("End Date", "end_date", "date"),
+            ("Hours", "hours", "entry"),
             ("Notes", "notes", "entry"),
         ]
-        columns = ["Year", "Employee Name", "Type", "Start Date", "End Date", "Duration", "Notes"]
+        columns = ["Year", "Employee Name", "Type", "Start Date", "End Date", "Duration", "Hours", "Notes"]
         buttons = [
             ("Add", lambda: self._add_record("time_off")),
             ("Update", lambda: self._update_record("time_off")),
@@ -1029,7 +1044,7 @@ class EmployeeBenefitsApp:
 
         detail_frame = ttk.LabelFrame(container, text="Time Off")
         detail_frame.pack(fill="both", expand=True)
-        columns = ("year", "employee_name", "time_off_type", "start_date", "end_date", "duration_days", "notes")
+        columns = ("year", "employee_name", "time_off_type", "start_date", "end_date", "duration_days", "hours", "notes")
         detail_tree = ttk.Treeview(detail_frame, columns=columns, show="headings", height=8)
         detail_tree.heading("year", text="Year")
         detail_tree.heading("employee_name", text="Employee Name")
@@ -1037,6 +1052,7 @@ class EmployeeBenefitsApp:
         detail_tree.heading("start_date", text="Start Date")
         detail_tree.heading("end_date", text="End Date")
         detail_tree.heading("duration_days", text="Duration")
+        detail_tree.heading("hours", text="Hours")
         detail_tree.heading("notes", text="Notes")
         detail_tree.column("year", width=80, anchor="center")
         detail_tree.column("employee_name", width=190, anchor="w")
@@ -1044,6 +1060,7 @@ class EmployeeBenefitsApp:
         detail_tree.column("start_date", width=105, anchor="center")
         detail_tree.column("end_date", width=105, anchor="center")
         detail_tree.column("duration_days", width=90, anchor="center")
+        detail_tree.column("hours", width=80, anchor="center")
         detail_tree.column("notes", width=300, anchor="w")
         detail_scroll = ttk.Scrollbar(detail_frame, orient="vertical", command=detail_tree.yview)
         detail_tree.configure(yscrollcommand=detail_scroll.set)
@@ -1087,6 +1104,7 @@ class EmployeeBenefitsApp:
                     "time_off_type": row["time_off_type"],
                     "start_date": row["start_date"],
                     "end_date": row["end_date"],
+                    "hours": self._time_off_hours(row),
                     "notes": row["notes"],
                     "start": start,
                     "end": end,
@@ -1113,6 +1131,7 @@ class EmployeeBenefitsApp:
                     row["start_date"],
                     row["end_date"],
                     row["duration"],
+                    f"{row['hours']:.2f}",
                     row["notes"],
                 ),
             )
@@ -1280,6 +1299,7 @@ class EmployeeBenefitsApp:
                 record["start_date"],
                 record["end_date"],
                 str(record["duration_days"]),
+                f"{self._time_off_hours(record):.2f}",
                 record["notes"],
             )
         if tab_key == "performance":
@@ -1455,7 +1475,7 @@ class EmployeeBenefitsApp:
             self._set_form_value(tab_key, key, "")
 
         defaults = {
-            "time_off": {"time_off_type": "Vacation"},
+            "time_off": {},
             "performance": {"rating": "3"},
             "deductions": {
                 "deduction_type": "BCBS",
@@ -1507,12 +1527,16 @@ class EmployeeBenefitsApp:
             start_date = parse_date(values["start_date"], "Start Date", required=True)
             end_date = parse_date(values["end_date"], "End Date", required=True)
             duration_days = calculate_duration_days(start_date, end_date)
+            hours = as_float(values["hours"], "Hours")
+            if hours <= 0:
+                raise ValueError("Hours must be greater than zero.")
             record = {
                 "employee_name": employee_name,
                 "time_off_type": values["time_off_type"] or "Vacation",
                 "start_date": start_date.strftime(DATE_FORMAT),
                 "end_date": end_date.strftime(DATE_FORMAT),
                 "duration_days": duration_days,
+                "hours": round(hours, 2),
                 "notes": values["notes"],
             }
             self._validate_time_off_availability(record, ignore_id=ignore_id)
@@ -1703,7 +1727,7 @@ class EmployeeBenefitsApp:
             start = parse_date(row.get("start_date", ""), "Start Date")
             if not start or start.year != current_year:
                 continue
-            hours = float(row.get("duration_days", 0)) * 8
+            hours = self._time_off_hours(row)
             if row.get("time_off_type") == "Vacation":
                 used_vacation += hours
             if row.get("time_off_type") == "Sick":
@@ -1722,11 +1746,21 @@ class EmployeeBenefitsApp:
         if not admin_record.get("active", True):
             raise ValueError("Cannot add time off for an inactive employee.")
         remaining = self._remaining_time_off_hours(employee_name, exclude_record_id=ignore_id)
-        requested_hours = float(time_off_record["duration_days"]) * 8
+        requested_hours = self._time_off_hours(time_off_record)
         if time_off_record["time_off_type"] == "Vacation" and remaining["vacation"] - requested_hours < 0:
-            raise ValueError("Not enough Available Vacation Hours for this request.")
+            raise ValueError(
+                f"{employee_name} does not currently have enough paid vacation hours available for this request."
+            )
         if time_off_record["time_off_type"] == "Sick" and remaining["sick"] - requested_hours < 0:
-            raise ValueError("Not enough Available Sick Hours for this request.")
+            raise ValueError(
+                f"{employee_name} does not currently have enough paid sick hours available for this request."
+            )
+
+    def _time_off_hours(self, time_off_record):
+        """Return requested time-off hours with legacy fallback from duration days."""
+        if "hours" in time_off_record and str(time_off_record["hours"]).strip():
+            return round(as_float(time_off_record["hours"], "Hours"), 2)
+        return round(float(time_off_record.get("duration_days", 0) or 0.0) * 8, 2)
 
     def _find_time_off_conflicts(self, time_off_record, ignore_id=None):
         """Find existing time-off rows that overlap with the supplied date range."""
@@ -1834,13 +1868,19 @@ class EmployeeBenefitsApp:
         employee_name = normalize_text(row.get("Employee Name", ""))
         start_date = parse_date(row.get("Start Date", ""), "Start Date", required=True)
         end_date = parse_date(row.get("End Date", ""), "End Date", required=True)
+        duration_days = calculate_duration_days(start_date, end_date)
+        imported_hours = normalize_text(row.get("Hours", ""))
+        hours = as_float(imported_hours, "Hours") if imported_hours else round(float(duration_days) * 8, 2)
+        if hours <= 0:
+            raise ValueError("Hours must be greater than zero.")
         record = {
             "id": uuid4().hex,
             "employee_name": employee_name,
             "time_off_type": normalize_text(row.get("Type", "Vacation")) or "Vacation",
             "start_date": start_date.strftime(DATE_FORMAT),
             "end_date": end_date.strftime(DATE_FORMAT),
-            "duration_days": calculate_duration_days(start_date, end_date),
+            "duration_days": duration_days,
+            "hours": round(hours, 2),
             "notes": normalize_text(row.get("Notes", "")),
         }
         if not employee_name:
@@ -1976,7 +2016,7 @@ class EmployeeBenefitsApp:
     def _template_headers(self, tab_key):
         """Return template headers for one tab."""
         header_map = {
-            "time_off": ["Employee Name", "Type", "Start Date", "End Date", "Notes"],
+            "time_off": ["Employee Name", "Type", "Start Date", "End Date", "Hours", "Notes"],
             "performance": ["Employee Name", "Review Date", "Rating", "Summary", "Notes"],
             "deductions": [
                 "Employee Name",
@@ -2015,7 +2055,7 @@ class EmployeeBenefitsApp:
     def _rows_for_export(self, tab_key):
         """Return export headers and rows for the specified tab."""
         if tab_key == "time_off":
-            headers = ["Year", "Employee Name", "Type", "Start Date", "End Date", "Duration", "Notes"]
+            headers = ["Year", "Employee Name", "Type", "Start Date", "End Date", "Duration", "Hours", "Notes"]
             rows = [
                 {
                     "Year": record_year(row["start_date"]) or "",
@@ -2024,6 +2064,7 @@ class EmployeeBenefitsApp:
                     "Start Date": row["start_date"],
                     "End Date": row["end_date"],
                     "Duration": row["duration_days"],
+                    "Hours": f"{self._time_off_hours(row):.2f}",
                     "Notes": row["notes"],
                 }
                 for row in self.store["time_off"]
