@@ -1,4 +1,5 @@
 import csv
+import importlib
 import json
 import logging
 import os
@@ -19,6 +20,11 @@ try:
     import matplotlib.pyplot as plt
 except ImportError:
     plt = None
+
+try:
+    mplcursors = importlib.import_module("mplcursors")
+except ImportError:
+    mplcursors = None
 
 try:
     from tkcalendar import DateEntry
@@ -189,6 +195,7 @@ class EmployeeBenefitsApp:
         self.settings_widgets = {}
         self.reminder_widgets = {}
         self.chart_widgets = {}
+        self._hovertips_notice_shown = False
         self.gantt_widgets = {}
         self.gantt_rows = []
         self._apply_annual_reset_if_needed()
@@ -2291,10 +2298,20 @@ class EmployeeBenefitsApp:
             messagebox.showerror("Export failed", str(error), parent=self.root)
 
     def _calculate_yearly_totals(self):
-        """Compute payroll, raises/bonuses, and time-off totals by year."""
+        """Compute payroll, raises/bonuses, time-off, and deductions totals by year."""
         totals = {}
+
         def ensure_year(year):
-            totals.setdefault(year, {"payroll": 0.0, "raises_bonuses": 0.0, "time_off_days": 0.0})
+            totals.setdefault(
+                year,
+                {
+                    "payroll": 0.0,
+                    "raises_bonuses": 0.0,
+                    "time_off_days": 0.0,
+                    "deductions_monthly": 0.0,
+                    "deductions_weekly": 0.0,
+                },
+            )
 
         current_year = str(date.today().year)
         ensure_year(current_year)
@@ -2316,9 +2333,17 @@ class EmployeeBenefitsApp:
             year = str(record_year(row["start_date"]))
             ensure_year(year)
             totals[year]["time_off_days"] += float(row["duration_days"])
+
+        for row in self.store["deductions"]:
+            year = str(record_year(row["start_date"]))
+            ensure_year(year)
+            totals[year]["deductions_monthly"] += float(row.get("monthly_amount", 0.0))
+            totals[year]["deductions_weekly"] += float(row.get("weekly_deduction", 0.0))
         for metrics in totals.values():
             metrics["raises_bonuses"] = round(metrics["raises_bonuses"], 2)
             metrics["time_off_days"] = round(metrics["time_off_days"], 2)
+            metrics["deductions_monthly"] = round(metrics["deductions_monthly"], 2)
+            metrics["deductions_weekly"] = round(metrics["deductions_weekly"], 2)
         return totals
 
     def _refresh_chart_summary(self):
@@ -2336,12 +2361,21 @@ class EmployeeBenefitsApp:
             tree.insert("", "end", values=(year, "Payroll", "Total Annual Active Payroll", f"{metrics['payroll']:,.2f}"))
             tree.insert("", "end", values=(year, "Raises & Bonuses", "Total Yearly Difference", f"{metrics['raises_bonuses']:,.2f}"))
             tree.insert("", "end", values=(year, "Time Off", "Total Scheduled Days", f"{metrics['time_off_days']:,.2f}"))
+            tree.insert("", "end", values=(year, "Deductions", "Total Monthly Amount", f"{metrics['deductions_monthly']:,.2f}"))
+            tree.insert("", "end", values=(year, "Deductions", "Total Weekly Deduction", f"{metrics['deductions_weekly']:,.2f}"))
 
     def _launch_chart(self):
         """Launch the selected chart type in a separate matplotlib window."""
         if plt is None:
             messagebox.showerror("Charts", "matplotlib is required to launch charts.", parent=self.root)
             return
+        if mplcursors is None and not self._hovertips_notice_shown:
+            messagebox.showwarning(
+                "Charts",
+                "mplcursors is not installed. Charts will launch without hovertips.",
+                parent=self.root,
+            )
+            self._hovertips_notice_shown = True
         chart_type = self.chart_widgets["chart_var"].get()
         if chart_type == "Payroll":
             self._launch_payroll_chart()
@@ -2354,53 +2388,341 @@ class EmployeeBenefitsApp:
             return
         messagebox.showerror("Charts", "Unsupported chart type selected.", parent=self.root)
 
+    def _apply_light_horizontal_gridlines(self, axis):
+        """Apply light horizontal gridlines for chart readability."""
+        axis.set_axisbelow(True)
+        axis.grid(axis="y", color="#d9d9d9", linestyle="-", linewidth=0.6, alpha=0.8)
+
+    def _store_hover_cursor(self, figure, cursor):
+        """Keep mplcursors cursor references alive for the active figure."""
+        if not hasattr(figure, "_hover_cursors"):
+            figure._hover_cursors = []
+        figure._hover_cursors.append(cursor)
+
+    def _format_hover_value(self, value, format_type):
+        """Format hover tooltip numeric values for currency, percent, or plain numbers."""
+        if format_type == "percent":
+            return f"{value:,.2f}%"
+        if format_type == "number":
+            return f"{value:,.0f}"
+        return f"${value:,.2f}"
+
+    def _attach_bar_hovertips(self, figure, bar_container, series_name, x_labels=None, format_type="currency"):
+        """Attach mplcursors hovertips to a matplotlib bar container."""
+        if mplcursors is None:
+            return
+        patches = list(bar_container.patches)
+        if not patches:
+            return
+        cursor = mplcursors.cursor(patches, hover=True)
+        self._store_hover_cursor(figure, cursor)
+
+        @cursor.connect("add")
+        def _on_add(selection):
+            patch = selection.artist
+            index = None
+            if patch in patches:
+                index = patches.index(patch)
+            elif selection.index is not None:
+                index = int(round(selection.index))
+            label = ""
+            if x_labels is not None and index is not None:
+                safe_index = int(index)
+                if 0 <= safe_index < len(x_labels):
+                    label = f"{x_labels[safe_index]}: "
+            if hasattr(patch, "get_height"):
+                value = float(patch.get_height())
+            elif hasattr(patch, "get_width"):
+                value = float(patch.get_width())
+            else:
+                value = float(selection.target[1]) if selection.target is not None else 0.0
+            value_text = self._format_hover_value(value, format_type)
+            selection.annotation.set_text(f"{series_name}\n{label}{value_text}")
+
+    def _attach_line_hovertips(self, figure, line, series_name, x_labels=None, format_type="currency"):
+        """Attach mplcursors hovertips to a matplotlib line chart series."""
+        if mplcursors is None:
+            return
+        cursor = mplcursors.cursor(line, hover=True)
+        self._store_hover_cursor(figure, cursor)
+
+        @cursor.connect("add")
+        def _on_add(selection):
+            point_index = selection.index if selection.index is not None else 0
+            safe_index = int(round(point_index))
+            x_text = f"x={selection.target[0]:.2f}"
+            if x_labels is not None and 0 <= safe_index < len(x_labels):
+                x_text = str(x_labels[safe_index])
+            y_value = float(selection.target[1])
+            y_text = self._format_hover_value(y_value, format_type)
+            selection.annotation.set_text(f"{series_name}\n{x_text}: {y_text}")
+
     def _launch_payroll_chart(self):
-        """Launch a yearly payroll bar chart."""
+        """Launch a payroll dashboard with mixed subplots and KPI metrics."""
         yearly = self._calculate_yearly_totals()
         years = sorted(yearly.keys(), key=int)
         values = [yearly[year]["payroll"] for year in years]
-        if not years:
+        active_admin = [row for row in self.store["admin"] if row.get("active", True)]
+        if not active_admin:
             messagebox.showinfo("Charts", "No payroll data available.", parent=self.root)
             return
-        plt.figure(figsize=(10, 6))
-        plt.bar(years, values, color="#1f77b4")
-        plt.title("Payroll by Year")
-        plt.xlabel("Year")
-        plt.ylabel("Total Annual Active Payroll")
-        plt.tight_layout()
+
+        year_over_year_change = []
+        previous = None
+        for value in values:
+            if previous is None or previous == 0:
+                year_over_year_change.append(0.0)
+            else:
+                year_over_year_change.append(round(((value - previous) / previous) * 100, 2))
+            previous = value
+
+        per_employee_payroll = []
+        for row in active_admin:
+            name = normalize_text(row.get("employee_name", ""))
+            if not name:
+                continue
+            annual_total = annualized_pay(row.get("pay_type", "Hourly"), float(row.get("pay", 0.0)))
+            per_employee_payroll.append((name, annual_total))
+        per_employee_payroll.sort(key=lambda item: item[1], reverse=True)
+        top_entries = per_employee_payroll[:5]
+        other_total = round(sum(amount for _, amount in per_employee_payroll[5:]), 2)
+        if other_total > 0:
+            top_entries.append(("Other", other_total))
+        if not top_entries:
+            top_entries = [("Unassigned", max(sum(values), 0.0))]
+
+        fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+        fig.suptitle("Payroll Dashboard", fontsize=14, fontweight="bold")
+
+        payroll_bars = axes[0, 0].bar(years, values, color="#1f77b4")
+        self._apply_light_horizontal_gridlines(axes[0, 0])
+        axes[0, 0].set_title("Annual Active Payroll")
+        axes[0, 0].set_xlabel("Year")
+        axes[0, 0].set_ylabel("Payroll")
+        self._attach_bar_hovertips(fig, payroll_bars, "Annual Active Payroll", x_labels=years)
+
+        (yoy_line,) = axes[0, 1].plot(years, year_over_year_change, marker="o", color="#ff7f0e")
+        self._apply_light_horizontal_gridlines(axes[0, 1])
+        axes[0, 1].axhline(0, color="#808080", linewidth=0.8, linestyle="--")
+        axes[0, 1].set_title("Year-over-Year Payroll Change (%)")
+        axes[0, 1].set_xlabel("Year")
+        axes[0, 1].set_ylabel("Change %")
+        self._attach_line_hovertips(
+            fig,
+            yoy_line,
+            "Year-over-Year Payroll Change",
+            x_labels=years,
+            format_type="percent",
+        )
+
+        pie_labels = [name for name, _ in top_entries]
+        pie_values = [amount for _, amount in top_entries]
+        axes[1, 0].pie(pie_values, labels=pie_labels, autopct="%1.1f%%", startangle=90)
+        axes[1, 0].set_title("Active Payroll Share by Employee")
+
+        latest_year = years[-1]
+        total_payroll = sum(values)
+        average_payroll = round(total_payroll / len(values), 2) if values else 0.0
+        latest_payroll = yearly[latest_year]["payroll"]
+        axes[1, 1].axis("off")
+        axes[1, 1].set_title("KPI Snapshot")
+        axes[1, 1].text(0.05, 0.82, f"Active Employees: {len(active_admin)}", fontsize=11, weight="bold")
+        axes[1, 1].text(0.05, 0.62, f"Latest Year ({latest_year}) Payroll: ${latest_payroll:,.2f}", fontsize=11)
+        axes[1, 1].text(0.05, 0.42, f"All-Year Payroll Total: ${total_payroll:,.2f}", fontsize=11)
+        axes[1, 1].text(0.05, 0.22, f"Average Payroll per Year: ${average_payroll:,.2f}", fontsize=11)
+
+        plt.tight_layout(rect=(0, 0, 1, 0.96))
         plt.show()
 
     def _launch_raise_bonus_chart(self):
-        """Launch a yearly raises-and-bonuses line chart."""
-        yearly = self._calculate_yearly_totals()
-        years = sorted(yearly.keys(), key=int)
-        values = [yearly[year]["raises_bonuses"] for year in years]
-        if not years:
+        """Launch a raises/bonuses dashboard with mixed subplots and KPI metrics."""
+        records = self.store["raises_bonuses"]
+        if not records:
             messagebox.showinfo("Charts", "No raise/bonus data available.", parent=self.root)
             return
-        plt.figure(figsize=(10, 6))
-        plt.plot(years, values, marker="o", color="#2ca02c")
-        plt.title("Raises & Bonuses by Year")
-        plt.xlabel("Year")
-        plt.ylabel("Total Yearly Difference")
-        plt.tight_layout()
+
+        yearly_totals = {}
+        yearly_raise_percent_totals = {}
+        yearly_raise_percent_counts = {}
+        change_count_totals = {"Raise": 0, "Bonus": 0}
+        change_amount_totals = {"Raise": 0.0, "Bonus": 0.0}
+        employee_totals = {}
+
+        for row in records:
+            year = str(record_year(row["effective_date"]))
+            change_type = "Bonus" if normalize_text(row.get("change_type", "Raise")) == "Bonus" else "Raise"
+            yearly_difference = float(row.get("yearly_difference", row.get("calculated_value", 0.0)) or 0.0)
+            yearly_totals[year] = yearly_totals.get(year, 0.0) + yearly_difference
+            change_count_totals[change_type] += 1
+            change_amount_totals[change_type] += yearly_difference
+
+            employee_name = normalize_text(row.get("employee_name", ""))
+            if employee_name:
+                employee_totals[employee_name] = employee_totals.get(employee_name, 0.0) + yearly_difference
+
+            if change_type == "Raise":
+                yearly_raise_percent_totals[year] = yearly_raise_percent_totals.get(year, 0.0) + float(
+                    row.get("payroll_increase_percent", 0.0)
+                )
+                yearly_raise_percent_counts[year] = yearly_raise_percent_counts.get(year, 0) + 1
+
+        years = sorted(yearly_totals.keys(), key=int)
+        yearly_values = [round(yearly_totals[year], 2) for year in years]
+        avg_raise_percents = [
+            round(yearly_raise_percent_totals.get(year, 0.0) / yearly_raise_percent_counts.get(year, 1), 2)
+            if yearly_raise_percent_counts.get(year, 0)
+            else 0.0
+            for year in years
+        ]
+
+        fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+        fig.suptitle("Raises & Bonuses Dashboard", fontsize=14, fontweight="bold")
+
+        (difference_line,) = axes[0, 0].plot(years, yearly_values, marker="o", color="#2ca02c")
+        self._apply_light_horizontal_gridlines(axes[0, 0])
+        axes[0, 0].set_title("Yearly Total Difference")
+        axes[0, 0].set_xlabel("Year")
+        axes[0, 0].set_ylabel("Amount")
+        self._attach_line_hovertips(fig, difference_line, "Yearly Total Difference", x_labels=years)
+
+        count_labels = list(change_count_totals.keys())
+        count_values = [change_count_totals[key] for key in count_labels]
+        change_count_bars = axes[0, 1].bar(count_labels, count_values, color=["#1f77b4", "#ff9896"])
+        self._apply_light_horizontal_gridlines(axes[0, 1])
+        axes[0, 1].set_title("Change Counts by Type")
+        axes[0, 1].set_ylabel("Count")
+        self._attach_bar_hovertips(
+            fig,
+            change_count_bars,
+            "Change Count",
+            x_labels=count_labels,
+            format_type="number",
+        )
+
+        pie_labels = list(change_amount_totals.keys())
+        pie_values = [max(change_amount_totals[label], 0.0) for label in pie_labels]
+        if sum(pie_values) <= 0:
+            pie_values = [1.0, 0.0]
+        axes[1, 0].pie(pie_values, labels=pie_labels, autopct="%1.1f%%", startangle=90)
+        axes[1, 0].set_title("Amount Share by Change Type")
+
+        top_employee_name = ""
+        top_employee_value = 0.0
+        if employee_totals:
+            top_employee_name, top_employee_value = max(employee_totals.items(), key=lambda item: item[1])
+        total_amount = round(sum(yearly_values), 2)
+        total_events = sum(change_count_totals.values())
+        average_yearly = round(total_amount / len(yearly_values), 2) if yearly_values else 0.0
+        average_raise_percent = (
+            round(sum(avg_raise_percents) / len([value for value in avg_raise_percents if value != 0]), 2)
+            if any(value != 0 for value in avg_raise_percents)
+            else 0.0
+        )
+
+        axes[1, 1].axis("off")
+        axes[1, 1].set_title("KPI Snapshot")
+        axes[1, 1].text(0.05, 0.85, f"Total Events: {total_events}", fontsize=11, weight="bold")
+        axes[1, 1].text(0.05, 0.67, f"All-Year Difference Total: ${total_amount:,.2f}", fontsize=11)
+        axes[1, 1].text(0.05, 0.49, f"Average Yearly Difference: ${average_yearly:,.2f}", fontsize=11)
+        axes[1, 1].text(0.05, 0.31, f"Average Raise %: {average_raise_percent:.2f}%", fontsize=11)
+        axes[1, 1].text(
+            0.05,
+            0.13,
+            f"Top Employee Impact: {top_employee_name or 'N/A'} (${top_employee_value:,.2f})",
+            fontsize=11,
+        )
+
+        raise_percent_axis = axes[0, 0].twinx()
+        (avg_raise_line,) = raise_percent_axis.plot(years, avg_raise_percents, marker="s", linestyle="--", color="#9467bd")
+        self._apply_light_horizontal_gridlines(raise_percent_axis)
+        self._attach_line_hovertips(
+            fig,
+            avg_raise_line,
+            "Average Raise %",
+            x_labels=years,
+            format_type="percent",
+        )
+        axes[0, 0].set_title("Yearly Total Difference (line) + Avg Raise % (dashed)")
+
+        plt.tight_layout(rect=(0, 0, 1, 0.96))
         plt.show()
 
     def _launch_deductions_chart(self):
-        """Launch a deductions composition pie chart."""
-        totals = {}
-        for row in self.store["deductions"]:
-            key = row["deduction_type"]
-            totals[key] = totals.get(key, 0.0) + float(row["weekly_deduction"])
-        if not totals:
+        """Launch a deductions dashboard with mixed subplots and KPI metrics."""
+        records = self.store["deductions"]
+        if not records:
             messagebox.showinfo("Charts", "No deductions data available.", parent=self.root)
             return
-        labels = list(totals.keys())
-        values = [totals[label] for label in labels]
-        plt.figure(figsize=(9, 6))
-        plt.pie(values, labels=labels, autopct="%1.1f%%", startangle=90)
-        plt.title("Weekly Deductions by Type")
-        plt.tight_layout()
+
+        weekly_by_type = {}
+        monthly_by_type = {}
+        yearly_monthly_totals = {}
+        employer_contribution_total = 0.0
+        unique_employees = set()
+
+        for row in records:
+            deduction_type = normalize_text(row.get("deduction_type", "")) or "Other"
+            weekly_value = float(row.get("weekly_deduction", 0.0) or 0.0)
+            monthly_value = float(row.get("monthly_amount", 0.0) or 0.0)
+            employer_value = float(row.get("employer_contribution", 0.0) or 0.0)
+            year = str(record_year(row["start_date"]))
+
+            weekly_by_type[deduction_type] = weekly_by_type.get(deduction_type, 0.0) + weekly_value
+            monthly_by_type[deduction_type] = monthly_by_type.get(deduction_type, 0.0) + monthly_value
+            yearly_monthly_totals[year] = yearly_monthly_totals.get(year, 0.0) + monthly_value
+            employer_contribution_total += employer_value
+
+            employee_name = normalize_text(row.get("employee_name", ""))
+            if employee_name:
+                unique_employees.add(employee_name.casefold())
+
+        deduction_labels = sorted(weekly_by_type.keys(), key=str.casefold)
+        weekly_values = [round(weekly_by_type[label], 2) for label in deduction_labels]
+        monthly_values = [round(monthly_by_type[label], 2) for label in deduction_labels]
+        years = sorted(yearly_monthly_totals.keys(), key=int)
+        yearly_values = [round(yearly_monthly_totals[year], 2) for year in years]
+
+        fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+        fig.suptitle("Deductions Dashboard", fontsize=14, fontweight="bold")
+
+        weekly_deduction_bars = axes[0, 0].bar(deduction_labels, weekly_values, color="#17becf")
+        self._apply_light_horizontal_gridlines(axes[0, 0])
+        axes[0, 0].set_title("Weekly Deductions by Type")
+        axes[0, 0].set_ylabel("Weekly Deduction")
+        axes[0, 0].tick_params(axis="x", rotation=20)
+        self._attach_bar_hovertips(fig, weekly_deduction_bars, "Weekly Deductions", x_labels=deduction_labels)
+
+        (monthly_trend_line,) = axes[0, 1].plot(years, yearly_values, marker="o", color="#8c564b")
+        self._apply_light_horizontal_gridlines(axes[0, 1])
+        axes[0, 1].set_title("Monthly Amount Trend by Start Year")
+        axes[0, 1].set_xlabel("Year")
+        axes[0, 1].set_ylabel("Total Monthly Amount")
+        self._attach_line_hovertips(fig, monthly_trend_line, "Monthly Amount Trend", x_labels=years)
+
+        pie_values = [value if value > 0 else 0 for value in monthly_values]
+        if sum(pie_values) <= 0:
+            pie_values = [1.0] + [0.0 for _ in deduction_labels[1:]]
+        axes[1, 0].pie(pie_values, labels=deduction_labels, autopct="%1.1f%%", startangle=90)
+        axes[1, 0].set_title("Monthly Amount Share by Type")
+
+        total_monthly = round(sum(monthly_values), 2)
+        total_weekly = round(sum(weekly_values), 2)
+        average_weekly_per_employee = round(total_weekly / len(unique_employees), 2) if unique_employees else 0.0
+
+        axes[1, 1].axis("off")
+        axes[1, 1].set_title("KPI Snapshot")
+        axes[1, 1].text(0.05, 0.85, f"Deduction Records: {len(records)}", fontsize=11, weight="bold")
+        axes[1, 1].text(0.05, 0.67, f"Total Monthly Amount: ${total_monthly:,.2f}", fontsize=11)
+        axes[1, 1].text(0.05, 0.49, f"Total Weekly Deduction: ${total_weekly:,.2f}", fontsize=11)
+        axes[1, 1].text(0.05, 0.31, f"Employer Contribution Total: ${employer_contribution_total:,.2f}", fontsize=11)
+        axes[1, 1].text(
+            0.05,
+            0.13,
+            f"Avg Weekly/Employee: ${average_weekly_per_employee:,.2f}",
+            fontsize=11,
+        )
+
+        plt.tight_layout(rect=(0, 0, 1, 0.96))
         plt.show()
 
 def create_gui():

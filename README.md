@@ -20,7 +20,7 @@ deductions, raises/bonuses, reminders, charts, and a dedicated Gantt timeline vi
 - **payroll.py**: Standalone payroll totals example using its employee map.
 - **tests/test_employee_benefits.py**: Pytest unit and GUI interaction tests.
 - **requirements.txt**: Dependency list (includes `pytest`, `matplotlib`,
-  `openpyxl`, and `tkcalendar`).
+  `mplcursors`, `openpyxl`, and `tkcalendar`).
 - **LICENSE.txt**: MIT license.
 
 ## Installation
@@ -81,9 +81,13 @@ The GUI includes these tabs:
   - Show upcoming time off and hire-date anniversaries
   - Export reminder view to CSV/XLSX
 - **Charts**
-  - Launch standalone matplotlib charts (outside table view)
-  - Includes payroll, raises/bonuses, and deductions
-  - Tracks yearly totals for payroll, raises/bonuses yearly differences, and time off
+  - Launch standalone matplotlib dashboard windows (outside table view)
+  - Includes Payroll, Raises & Bonuses, and Deductions dashboards
+  - Each dashboard uses a 2x2 subplot layout with mixed chart types:
+    line charts, bar charts, pie charts, and KPI summary panels
+  - Bar and line charts include light horizontal gridlines for readability
+  - Interactive hovertips are enabled on bar and line charts via `mplcursors`
+  - Yearly summary metrics include payroll, raises/bonuses, time off, and deductions
 - **Gantt Chart**
   - Displays a dedicated Time Off Gantt timeline using an in-app canvas view
   - Shows one daily tick across the next 30 days starting from today
