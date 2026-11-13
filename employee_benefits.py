@@ -106,6 +106,41 @@ def calculate_duration_days(start_date, end_date):
     return (end_date - start_date).days + 1
 
 
+def nth_weekday_of_month(year, month, weekday, occurrence):
+    """Return the nth weekday date for a month (weekday: Monday=0..Sunday=6)."""
+    first_day = date(year, month, 1)
+    offset = (weekday - first_day.weekday()) % 7
+    day_number = 1 + offset + ((occurrence - 1) * 7)
+    return date(year, month, day_number)
+
+
+def last_weekday_of_month(year, month, weekday):
+    """Return the last weekday date for a month (weekday: Monday=0..Sunday=6)."""
+    if month == 12:
+        next_month_first = date(year + 1, 1, 1)
+    else:
+        next_month_first = date(year, month + 1, 1)
+    last_day = next_month_first - timedelta(days=1)
+    offset = (last_day.weekday() - weekday) % 7
+    return last_day - timedelta(days=offset)
+
+
+def company_paid_holidays_for_year(year):
+    """Return configured company paid holidays for one year."""
+    thanksgiving = nth_weekday_of_month(year, 11, weekday=3, occurrence=4)
+    holiday_dates = [
+        ("New Year's Day", date(year, 1, 1)),
+        ("Memorial Day", last_weekday_of_month(year, 5, weekday=0)),
+        ("4th of July", date(year, 7, 4)),
+        ("Labor Day", nth_weekday_of_month(year, 9, weekday=0, occurrence=1)),
+        ("Thanksgiving Day", thanksgiving),
+        ("Day After Thanksgiving", thanksgiving + timedelta(days=1)),
+        ("Christmas Eve", date(year, 12, 24)),
+        ("Christmas Day", date(year, 12, 25)),
+    ]
+    return holiday_dates
+
+
 def annualized_pay(pay_type, pay):
     """Convert hourly or salary pay to annual compensation."""
     if pay_type == "Hourly":
@@ -683,7 +718,7 @@ class EmployeeBenefitsApp:
         """Build the Time Off tab and its controls."""
         fields = [
             ("Employee Name", "employee_name", "employee_combo"),
-            ("Type", "time_off_type", "combo", ["", "Vacation", "Sick", "Not Paid"]),
+            ("Type", "time_off_type", "combo", ["", "Vacation", "Sick", "Not Paid", "Holiday"]),
             ("Start Date", "start_date", "date"),
             ("End Date", "end_date", "date"),
             ("Hours", "hours", "entry"),
@@ -1083,12 +1118,34 @@ class EmployeeBenefitsApp:
             "tree": detail_tree,
         }
 
+    def _build_company_paid_holiday_rows(self, window_start, window_end):
+        """Build synthetic company holiday time-off rows within a date range."""
+        holiday_rows = []
+        for year in range(window_start.year, window_end.year + 1):
+            for holiday_name, holiday_date in company_paid_holidays_for_year(year):
+                if holiday_date < window_start or holiday_date > window_end:
+                    continue
+                holiday_slug = holiday_name.lower().replace(" ", "-").replace("'", "")
+                holiday_rows.append(
+                    {
+                        "id": f"holiday-{year}-{holiday_slug}",
+                        "employee_name": holiday_name,
+                        "time_off_type": "Holiday",
+                        "start_date": holiday_date.strftime(DATE_FORMAT),
+                        "end_date": holiday_date.strftime(DATE_FORMAT),
+                        "duration_days": 1,
+                        "hours": 8.0,
+                        "notes": "Company Paid Holiday",
+                    }
+                )
+        return holiday_rows
+
     def _build_time_off_gantt_rows(self):
         """Build normalized rows for records overlapping the next 30 days."""
         window_start = date.today()
         window_end = window_start + timedelta(days=29)
         rows = sorted(
-            self.store["time_off"],
+            self.store["time_off"] + self._build_company_paid_holiday_rows(window_start, window_end),
             key=lambda item: (
                 record_year(item["start_date"]) or 0,
                 normalize_text(item["employee_name"]).casefold(),
@@ -1190,6 +1247,7 @@ class EmployeeBenefitsApp:
             "Vacation": "#1d4ed8",
             "Sick": "#2a9d8f",
             "Not Paid": "#6b7280",
+            "Holiday": "#ca8a04",
         }
         for index, row in enumerate(self.gantt_rows):
             y_top = top_margin + (index * row_height)
@@ -2208,7 +2266,7 @@ class EmployeeBenefitsApp:
         raise ValueError("Only .csv and .xlsx exports are supported.")
 
     def _refresh_reminders(self):
-        """Rebuild reminder rows for upcoming time-off and anniversaries."""
+        """Rebuild reminder rows for upcoming time-off, holidays, and anniversaries."""
         if not self.reminder_widgets:
             return
         tree = self.reminder_widgets["tree"]
@@ -2226,12 +2284,13 @@ class EmployeeBenefitsApp:
         limit = date.fromordinal(today.toordinal() + lookahead_days)
         rows = []
 
-        for row in self.store["time_off"]:
+        for row in self.store["time_off"] + self._build_company_paid_holiday_rows(today, limit):
             start = parse_date(row["start_date"], "Start Date")
             if start and today <= start <= limit:
+                category = "Company Holiday" if row["time_off_type"] == "Holiday" else "Time Off"
                 rows.append(
                     (
-                        "Time Off",
+                        category,
                         row["employee_name"],
                         row["start_date"],
                         row["end_date"],
