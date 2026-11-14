@@ -169,14 +169,18 @@ def make_default_store():
     seed = load_employee_details_seed()
     current_year = str(date.today().year)
     admin_records = []
-    for seed_row in seed:
+    for index, seed_row in enumerate(seed, start=1):
         latest_year = max((year for year in seed_row if year.isdigit()), default=None)
         latest = seed_row.get(latest_year, {}) if latest_year else {}
         pay = float(latest.get("salary", 0) or 0)
         admin_records.append(
             {
                 "id": uuid4().hex,
+                "employee_id": f"{index:03d}",
                 "employee_name": normalize_text(seed_row.get("name", "")),
+                "title": "",
+                "dob": "",
+                "dl_no_state": "",
                 "hire_date": "",
                 "termination_date": "",
                 "pay_type": "Salary",
@@ -304,6 +308,10 @@ class EmployeeBenefitsApp:
         default_employer_contribution = self._get_setting_value("default_employer_contribution", store=store)
 
         for row in store["admin"]:
+            row.setdefault("employee_id", "")
+            row.setdefault("title", "")
+            row.setdefault("dob", "")
+            row.setdefault("dl_no_state", "")
             row.setdefault("available_vacation_hours", default_vacation_hours)
             row.setdefault("available_sick_hours", default_sick_hours)
             row.setdefault("active", True)
@@ -312,6 +320,28 @@ class EmployeeBenefitsApp:
             row.setdefault("termination_date", "")
             row.setdefault("pay_type", "Hourly")
             row.setdefault("pay", 0.0)
+            try:
+                parsed_dob = parse_date(row.get("dob", ""), "DOB")
+            except ValueError:
+                parsed_dob = None
+            row["dob"] = parsed_dob.strftime(DATE_FORMAT) if parsed_dob else ""
+            employee_id = normalize_text(row.get("employee_id", ""))
+            row["employee_id"] = f"{int(employee_id):03d}" if employee_id.isdigit() else ""
+
+        assigned_ids = set()
+        next_employee_id = 1
+        for row in store["admin"]:
+            employee_id = normalize_text(row.get("employee_id", ""))
+            if employee_id.isdigit() and employee_id not in assigned_ids:
+                assigned_ids.add(employee_id)
+                next_employee_id = max(next_employee_id, int(employee_id) + 1)
+                continue
+            while f"{next_employee_id:03d}" in assigned_ids:
+                next_employee_id += 1
+            generated_employee_id = f"{next_employee_id:03d}"
+            row["employee_id"] = generated_employee_id
+            assigned_ids.add(generated_employee_id)
+            next_employee_id += 1
 
         for row in store["time_off"]:
             row.setdefault("time_off_type", "Vacation")
@@ -450,6 +480,42 @@ class EmployeeBenefitsApp:
                 return row
         return None
 
+    def _next_admin_employee_id(self):
+        """Return the next sequential admin Employee ID."""
+        highest = 0
+        for row in self.store["admin"]:
+            employee_id = normalize_text(row.get("employee_id", ""))
+            if employee_id.isdigit():
+                highest = max(highest, int(employee_id))
+        next_value = highest + 1
+        width = max(3, len(str(next_value)))
+        return f"{next_value:0{width}d}"
+
+    def _validate_unique_admin_employee_id(self, employee_id, ignore_id=None):
+        """Ensure the supplied Employee ID is unique in Admin rows."""
+        candidate = normalize_text(employee_id)
+        if not candidate:
+            raise ValueError("Employee ID is required.")
+        if not candidate.isdigit():
+            raise ValueError("Employee ID must contain only digits.")
+        candidate = f"{int(candidate):03d}"
+        for row in self.store["admin"]:
+            if ignore_id and row.get("id") == ignore_id:
+                continue
+            existing = normalize_text(row.get("employee_id", ""))
+            existing = f"{int(existing):03d}" if existing.isdigit() else existing
+            if existing == candidate:
+                raise ValueError(f"Employee ID {candidate} already exists.")
+        return candidate
+
+    def _status_from_active(self, active):
+        """Return display status text from active boolean."""
+        return "Active" if bool(active) else "Inactive"
+
+    def _active_from_status(self, status_text):
+        """Return active boolean from status text."""
+        return normalize_text(status_text).casefold() != "inactive"
+
     def _save_store(self, store=None):
         """Persist the active store JSON to disk."""
         active_store = store or self.store
@@ -503,7 +569,7 @@ class EmployeeBenefitsApp:
         except (TypeError, ValueError):
             return fallback
 
-    def _add_tab(self, notebook, title, key, fields, columns, buttons):
+    def _add_tab(self, notebook, title, key, fields, columns, buttons, fields_per_row=2):
         """Create one tab with form fields, buttons, and a treeview."""
         tab_frame = ttk.Frame(notebook)
         notebook.add(tab_frame, text=title)
@@ -520,8 +586,8 @@ class EmployeeBenefitsApp:
         for index, field in enumerate(fields):
             label, field_key, field_type = field[:3]
             choices = field[3] if len(field) > 3 else None
-            row = index // 2
-            col_offset = (index % 2) * 3
+            row = index // fields_per_row
+            col_offset = (index % fields_per_row) * 3
             ttk.Label(form_frame, text=label).grid(row=row, column=col_offset, sticky="e", padx=(2, 5), pady=4)
 
             var = tk.StringVar()
@@ -535,8 +601,8 @@ class EmployeeBenefitsApp:
             if field_type == "combo" and choices:
                 var.set(choices[0])
 
-        for column_index in range(6):
-            form_frame.columnconfigure(column_index, weight=1 if column_index in (1, 4) else 0)
+        for column_index in range(fields_per_row * 3):
+            form_frame.columnconfigure(column_index, weight=1 if column_index % 3 == 1 else 0)
 
         button_row = ttk.Frame(container)
         button_row.pack(fill="x", pady=(0, 8))
@@ -571,6 +637,8 @@ class EmployeeBenefitsApp:
         """Create one form widget based on field type and tab context."""
         if field_type == "combo":
             return ttk.Combobox(parent, textvariable=var, values=choices or (), state="readonly", width=36)
+        if field_type == "editable_combo":
+            return ttk.Combobox(parent, textvariable=var, values=choices or (), state="normal", width=36)
         if field_type == "readonly_entry":
             return ttk.Entry(parent, textvariable=var, state="readonly", width=36)
 
@@ -714,6 +782,27 @@ class EmployeeBenefitsApp:
         names.sort(key=str.casefold)
         return names
 
+    def _admin_title_choices(self):
+        """Return distinct Admin title options sorted alphabetically."""
+        titles = {
+            normalize_text(row.get("title", ""))
+            for row in self.store["admin"]
+            if normalize_text(row.get("title", ""))
+        }
+        return sorted(titles, key=str.casefold)
+
+    def _refresh_admin_title_options(self):
+        """Refresh Admin title combobox values from stored titles."""
+        tab = self.tabs.get("admin")
+        if not tab:
+            return
+        title_widget = tab.form_widgets.get("title")
+        if not isinstance(title_widget, ttk.Combobox):
+            return
+        current_value = tab.form_vars["title"].get()
+        title_widget.configure(values=self._admin_title_choices())
+        tab.form_vars["title"].set(current_value)
+
     def _build_time_off_tab(self, notebook):
         """Build the Time Off tab and its controls."""
         fields = [
@@ -833,24 +922,33 @@ class EmployeeBenefitsApp:
     def _build_admin_tab(self, notebook):
         """Build the Admin tab and its controls."""
         fields = [
+            ("Employee ID", "employee_id", "entry"),
             ("Employee Name", "employee_name", "employee_combo"),
+            ("Title", "title", "editable_combo", self._admin_title_choices()),
+            ("DOB", "dob", "date"),
+            ("DL No. - State", "dl_no_state", "entry"),
+            ("Status", "status", "combo", ["Active", "Inactive", "All"]),
             ("Hire Date", "hire_date", "date"),
             ("Pay Type", "pay_type", "combo", ["Hourly", "Salary"]),
             ("Termination Date", "termination_date", "date"),
             ("Pay", "pay", "entry"),
             ("Available Vacation (Hours)", "available_vacation_hours", "entry"),
-            ("Notes", "notes", "entry"),
             ("Available Sick (Hours)", "available_sick_hours", "entry"),
+            ("Notes", "notes", "entry"),
         ]
         columns = [
+            "Employee ID",
             "Employee Name",
+            "Title",
+            "DOB",
+            "DL No. - State",
             "Hire Date",
-            "Termination Date",
             "Pay Type",
             "Pay",
             "Available Vacation (Hours)",
             "Available Sick (Hours)",
-            "Active",
+            "Status",
+            "Termination Date",
             "Notes",
         ]
         buttons = [
@@ -858,14 +956,13 @@ class EmployeeBenefitsApp:
             ("Update", lambda: self._update_record("admin")),
             ("Delete", lambda: self._delete_record("admin")),
             ("Search", lambda: self._search_records("admin")),
-            ("Clear", lambda: self._clear_form("admin", refresh=True)),
-            ("Activate", lambda: self._set_employee_active(True)),
-            ("Deactivate", lambda: self._set_employee_active(False)),
+            ("Clear", lambda: self._clear_form("admin", refresh=True, apply_defaults=False)),
+            ("Driver List", self._export_driver_list),
             ("Import", lambda: self._import_records("admin")),
             ("Export", lambda: self._export_records("admin")),
             ("Template", lambda: self._export_template("admin")),
         ]
-        self._add_tab(notebook, "Admin", "admin", fields, columns, buttons)
+        self._add_tab(notebook, "Admin", "admin", fields, columns, buttons, fields_per_row=3)
 
     def _build_settings_tab(self, notebook):
         """Build the Settings tab for editing default preset values."""
@@ -1339,6 +1436,17 @@ class EmployeeBenefitsApp:
         tree = tab.tree
         tree.delete(*tree.get_children())
         rows = records if records is not None else self.store[tab_key]
+        if tab_key == "admin":
+            self._refresh_admin_title_options()
+        if tab_key == "admin" and records is None:
+            status_var = self.tabs["admin"].form_vars.get("status")
+            status_value = normalize_text(status_var.get() if status_var else "").casefold()
+            if status_value in {"active", "inactive"}:
+                rows = [
+                    row
+                    for row in rows
+                    if self._status_from_active(row.get("active", True)).casefold() == status_value
+                ]
 
         if tab_key == "time_off":
             rows = sorted(
@@ -1402,14 +1510,18 @@ class EmployeeBenefitsApp:
         if tab_key == "admin":
             remaining = self._remaining_time_off_hours(record["employee_name"])
             return (
+                record.get("employee_id", ""),
                 record["employee_name"],
+                record.get("title", ""),
+                record.get("dob", ""),
+                record.get("dl_no_state", ""),
                 record["hire_date"],
-                record["termination_date"],
                 record["pay_type"],
                 f"{record['pay']:.2f}",
                 f"{remaining['vacation']:.2f}",
                 f"{remaining['sick']:.2f}",
-                "Active" if record.get("active", True) else "Inactive",
+                self._status_from_active(record.get("active", True)),
+                record["termination_date"],
                 record["notes"],
             )
         raise ValueError(f"Unsupported tab key: {tab_key}")
@@ -1428,6 +1540,8 @@ class EmployeeBenefitsApp:
             value = record.get(field_key, "")
             if field_key == "bonus_percent":
                 value = f"{float(value) * 100:.2f}" if value else ""
+            if tab_key == "admin" and field_key == "status":
+                value = self._status_from_active(record.get("active", True))
             self._set_form_value(tab_key, field_key, value)
 
     def _get_form_values(self, tab_key):
@@ -1524,16 +1638,26 @@ class EmployeeBenefitsApp:
             for key, value in self._get_form_values(tab_key).items()
             if value
         }
+        status_filter = None
+        if tab_key == "admin" and "status" in criteria:
+            status_filter = criteria.pop("status")
         if not criteria:
-            self._refresh_tab(tab_key)
+            if tab_key == "admin" and status_filter in {"active", "inactive"}:
+                filtered = [row for row in self.store["admin"] if self._status_from_active(row.get("active", True)).casefold() == status_filter]
+                self._refresh_tab(tab_key, records=filtered)
+            else:
+                self._refresh_tab(tab_key)
             return
         filtered = []
         for record in self.store[tab_key]:
+            if tab_key == "admin" and status_filter in {"active", "inactive"}:
+                if self._status_from_active(record.get("active", True)).casefold() != status_filter:
+                    continue
             if all(criteria[key] in str(record.get(key, "")).casefold() for key in criteria):
                 filtered.append(record)
         self._refresh_tab(tab_key, records=filtered)
 
-    def _clear_form(self, tab_key, refresh):
+    def _clear_form(self, tab_key, refresh, apply_defaults=True):
         """Clear tab form values and reapply tab defaults."""
         tab = self.tabs[tab_key]
         for key in tab.form_vars:
@@ -1549,12 +1673,14 @@ class EmployeeBenefitsApp:
             "raises_bonuses": {"change_type": "Raise", "bonus_amount": "0.00", "bonus_percent": "0.00"},
             "admin": {
                 "pay_type": "Hourly",
+                "status": "Active",
                 "available_vacation_hours": f"{self._get_setting_value('default_vacation_hours'):.2f}",
                 "available_sick_hours": f"{self._get_setting_value('default_sick_hours'):.2f}",
             },
         }
-        for key, value in defaults.get(tab_key, {}).items():
-            self._set_form_value(tab_key, key, value)
+        if apply_defaults:
+            for key, value in defaults.get(tab_key, {}).items():
+                self._set_form_value(tab_key, key, value)
 
         tab.tree.selection_remove(tab.tree.selection())
         if tab_key == "raises_bonuses":
@@ -1659,9 +1785,12 @@ class EmployeeBenefitsApp:
             )
 
         if tab_key == "admin":
+            employee_id = normalize_text(values["employee_id"]) or self._next_admin_employee_id()
+            employee_id = self._validate_unique_admin_employee_id(employee_id, ignore_id=ignore_id)
             employee_name = values["employee_name"]
             if not employee_name:
                 raise ValueError("Employee Name is required.")
+            dob = parse_date(values["dob"], "DOB")
             hire_date = parse_date(values["hire_date"], "Hire Date")
             termination_date = parse_date(values["termination_date"], "Termination Date")
             if hire_date and termination_date and termination_date < hire_date:
@@ -1680,7 +1809,11 @@ class EmployeeBenefitsApp:
             if available_vacation_hours < 0 or available_sick_hours < 0:
                 raise ValueError("Available hours cannot be negative.")
             return {
+                "employee_id": employee_id,
                 "employee_name": employee_name,
+                "title": values["title"],
+                "dob": dob.strftime(DATE_FORMAT) if dob else "",
+                "dl_no_state": values["dl_no_state"],
                 "hire_date": hire_date.strftime(DATE_FORMAT) if hire_date else "",
                 "termination_date": termination_date.strftime(DATE_FORMAT) if termination_date else "",
                 "pay_type": values["pay_type"] or "Hourly",
@@ -1688,7 +1821,7 @@ class EmployeeBenefitsApp:
                 "available_vacation_hours": round(available_vacation_hours, 2),
                 "available_sick_hours": round(available_sick_hours, 2),
                 "notes": values["notes"],
-                "active": True,
+                "active": self._active_from_status(values.get("status", "Active")),
             }
 
         raise ValueError(f"Unsupported tab key: {tab_key}")
@@ -2011,9 +2144,12 @@ class EmployeeBenefitsApp:
 
     def _build_import_admin(self, row):
         """Build and validate one imported Admin record."""
+        employee_id = normalize_text(row.get("Employee ID", "")) or self._next_admin_employee_id()
+        employee_id = self._validate_unique_admin_employee_id(employee_id)
         employee_name = normalize_text(row.get("Employee Name", ""))
         if not employee_name:
             raise ValueError("Employee Name is required.")
+        dob = parse_date(row.get("DOB", ""), "DOB")
         hire_date = parse_date(row.get("Hire Date", ""), "Hire Date")
         termination_date = parse_date(row.get("Termination Date", ""), "Termination Date")
         if hire_date and termination_date and termination_date < hire_date:
@@ -2027,11 +2163,15 @@ class EmployeeBenefitsApp:
             row.get("Available Sick (Hours)", str(self._get_setting_value("default_sick_hours"))),
             "Available Sick (Hours)",
         )
-        active_text = normalize_text(row.get("Active", "Active")).casefold()
-        active = active_text not in {"inactive", "false", "0", "no"}
+        status_text = normalize_text(row.get("Status", row.get("Active", "Active")))
+        active = self._active_from_status(status_text)
         return {
             "id": uuid4().hex,
+            "employee_id": employee_id,
             "employee_name": employee_name,
+            "title": normalize_text(row.get("Title", "")),
+            "dob": dob.strftime(DATE_FORMAT) if dob else "",
+            "dl_no_state": normalize_text(row.get("DL No. - State", row.get("DL No.", ""))),
             "hire_date": hire_date.strftime(DATE_FORMAT) if hire_date else "",
             "termination_date": termination_date.strftime(DATE_FORMAT) if termination_date else "",
             "pay_type": normalize_text(row.get("Pay Type", "Hourly")) or "Hourly",
@@ -2058,6 +2198,40 @@ class EmployeeBenefitsApp:
             messagebox.showinfo("Export complete", f"Exported {len(rows)} row(s).", parent=self.root)
         except (OSError, ValueError) as error:
             LOGGER.warning("Export failed for %s: %s", tab_key, error)
+            messagebox.showerror("Export failed", str(error), parent=self.root)
+
+    def _export_driver_list(self):
+        """Export active employees with Driver title to CSV/XLSX."""
+        path = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Export driver list",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("Excel files", "*.xlsx")],
+        )
+        if not path:
+            return
+        headers = ["Employee ID", "Employee Name", "Hire Date", "Title", "DOB", "DL No. - State"]
+        rows = []
+        for row in self.store["admin"]:
+            if not row.get("active", True):
+                continue
+            if normalize_text(row.get("title", "")).casefold() != "driver":
+                continue
+            rows.append(
+                {
+                    "Employee ID": row.get("employee_id", ""),
+                    "Employee Name": row.get("employee_name", ""),
+                    "Hire Date": row.get("hire_date", ""),
+                    "Title": row.get("title", ""),
+                    "DOB": row.get("dob", ""),
+                    "DL No. - State": row.get("dl_no_state", ""),
+                }
+            )
+        try:
+            self._write_rows(path, headers, rows)
+            messagebox.showinfo("Export complete", f"Exported {len(rows)} driver row(s).", parent=self.root)
+        except (OSError, ValueError) as error:
+            LOGGER.warning("Driver list export failed: %s", error)
             messagebox.showerror("Export failed", str(error), parent=self.root)
 
     def _export_template(self, tab_key):
@@ -2102,14 +2276,18 @@ class EmployeeBenefitsApp:
                 "Notes",
             ],
             "admin": [
+                "Employee ID",
                 "Employee Name",
+                "Title",
+                "DOB",
+                "DL No. - State",
                 "Hire Date",
-                "Termination Date",
                 "Pay Type",
                 "Pay",
                 "Available Vacation (Hours)",
                 "Available Sick (Hours)",
-                "Active",
+                "Status",
+                "Termination Date",
                 "Notes",
             ],
         }
@@ -2210,14 +2388,18 @@ class EmployeeBenefitsApp:
 
         if tab_key == "admin":
             headers = [
+                "Employee ID",
                 "Employee Name",
+                "Title",
+                "DOB",
+                "DL No. - State",
                 "Hire Date",
-                "Termination Date",
                 "Pay Type",
                 "Pay",
                 "Available Vacation (Hours)",
                 "Available Sick (Hours)",
-                "Active",
+                "Status",
+                "Termination Date",
                 "Notes",
             ]
             rows = []
@@ -2225,14 +2407,18 @@ class EmployeeBenefitsApp:
                 remaining = self._remaining_time_off_hours(row["employee_name"])
                 rows.append(
                     {
+                        "Employee ID": row.get("employee_id", ""),
                         "Employee Name": row["employee_name"],
+                        "Title": row.get("title", ""),
+                        "DOB": row.get("dob", ""),
+                        "DL No. - State": row.get("dl_no_state", ""),
                         "Hire Date": row["hire_date"],
-                        "Termination Date": row["termination_date"],
                         "Pay Type": row["pay_type"],
                         "Pay": f"{row['pay']:.2f}",
                         "Available Vacation (Hours)": f"{remaining['vacation']:.2f}",
                         "Available Sick (Hours)": f"{remaining['sick']:.2f}",
-                        "Active": "Active" if row.get("active", True) else "Inactive",
+                        "Status": self._status_from_active(row.get("active", True)),
+                        "Termination Date": row["termination_date"],
                         "Notes": row["notes"],
                     }
                 )

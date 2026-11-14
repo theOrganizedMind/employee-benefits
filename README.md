@@ -68,8 +68,11 @@ The GUI includes these tabs:
   - Auto-populates From amounts from selected employee compensation
   - Import/export CSV and XLSX, plus downloadable templates
 - **Admin**
-  - Manage employee hire/termination, pay type/pay, status, and notes
-  - Track available vacation/sick hours and active/inactive status
+  - Manage employee IDs, titles, DOB, driver license/state, hire/termination, pay type/pay, status, and notes
+  - Employee IDs auto-increment from `001` and remain unique
+  - Title uses an editable dropdown (choose an existing title or type a new one)
+  - Status dropdown supports `Active`, `Inactive`, and `All` for filtering/search
+  - Includes **Driver List** export for active employees with title `Driver`
   - Import/export CSV and XLSX, plus downloadable templates
 - **Settings**
   - Configure preset defaults:

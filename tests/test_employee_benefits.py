@@ -103,15 +103,160 @@ def test_admin_layout_field_order(app):
     instance, _root = app
     keys = list(instance.tabs["admin"].form_vars.keys())
     assert keys == [
+        "employee_id",
         "employee_name",
+        "title",
+        "dob",
+        "dl_no_state",
+        "status",
         "hire_date",
         "pay_type",
         "termination_date",
         "pay",
         "available_vacation_hours",
-        "notes",
         "available_sick_hours",
+        "notes",
     ]
+
+
+def test_admin_status_defaults_to_active(app):
+    """Admin form should default status selector to Active."""
+    instance, _root = app
+    instance._clear_form("admin", refresh=False)
+    assert instance.tabs["admin"].form_vars["status"].get() == "Active"
+
+
+def test_admin_clear_button_clears_all_fields(app):
+    """Admin Clear action should clear all filter and form values."""
+    instance, _root = app
+    form = instance.tabs["admin"].form_vars
+    form["pay_type"].set("Hourly")
+    form["available_vacation_hours"].set("80")
+    form["available_sick_hours"].set("40")
+    form["status"].set("Inactive")
+
+    instance._clear_form("admin", refresh=False, apply_defaults=False)
+
+    assert form["pay_type"].get() == ""
+    assert form["available_vacation_hours"].get() == ""
+    assert form["available_sick_hours"].get() == ""
+    assert form["status"].get() == ""
+
+
+def test_admin_title_field_is_editable_combo(app):
+    """Admin Title field should be an editable combobox."""
+    instance, _root = app
+    widget = instance.tabs["admin"].form_widgets["title"]
+    assert widget.winfo_class() == "TCombobox"
+    assert str(widget.cget("state")) == "normal"
+
+
+def test_admin_treeview_column_order(app):
+    """Admin tree columns should match the requested output order."""
+    instance, _root = app
+    assert instance.tabs["admin"].columns == [
+        "Employee ID",
+        "Employee Name",
+        "Title",
+        "DOB",
+        "DL No. - State",
+        "Hire Date",
+        "Pay Type",
+        "Pay",
+        "Available Vacation (Hours)",
+        "Available Sick (Hours)",
+        "Status",
+        "Termination Date",
+        "Notes",
+    ]
+
+
+def test_admin_employee_id_auto_increments(app):
+    """Admin Employee ID should auto-fill the next sequential value."""
+    instance, _root = app
+    form = instance.tabs["admin"].form_vars
+    form["employee_id"].set("")
+    form["employee_name"].set("Taylor Example")
+    form["title"].set("Driver")
+    form["dob"].set("1990-05-05")
+    form["dl_no_state"].set("D123-CA")
+    form["hire_date"].set("2026-01-01")
+    form["termination_date"].set("")
+    form["pay_type"].set("Hourly")
+    form["pay"].set("30")
+    form["available_vacation_hours"].set("80")
+    form["available_sick_hours"].set("40")
+    form["status"].set("Active")
+    form["notes"].set("")
+
+    record = instance._build_record_from_form("admin")
+    assert record["employee_id"] == "003"
+
+
+def test_driver_list_export_filters_active_drivers(app, monkeypatch, tmp_path):
+    """Driver List export should include only active employees with Driver title."""
+    instance, _root = app
+    instance.store["admin"] = [
+        {
+            "id": "1",
+            "employee_id": "001",
+            "employee_name": "Active Driver",
+            "title": "Driver",
+            "dob": "1990-01-01",
+            "dl_no_state": "A111-TX",
+            "hire_date": "2020-01-01",
+            "termination_date": "",
+            "pay_type": "Hourly",
+            "pay": 30.0,
+            "available_vacation_hours": 80.0,
+            "available_sick_hours": 40.0,
+            "notes": "",
+            "active": True,
+        },
+        {
+            "id": "2",
+            "employee_id": "002",
+            "employee_name": "Inactive Driver",
+            "title": "Driver",
+            "dob": "1991-01-01",
+            "dl_no_state": "B222-TX",
+            "hire_date": "2020-02-01",
+            "termination_date": "",
+            "pay_type": "Hourly",
+            "pay": 30.0,
+            "available_vacation_hours": 80.0,
+            "available_sick_hours": 40.0,
+            "notes": "",
+            "active": False,
+        },
+        {
+            "id": "3",
+            "employee_id": "003",
+            "employee_name": "Active Non Driver",
+            "title": "Manager",
+            "dob": "1992-01-01",
+            "dl_no_state": "C333-TX",
+            "hire_date": "2020-03-01",
+            "termination_date": "",
+            "pay_type": "Hourly",
+            "pay": 30.0,
+            "available_vacation_hours": 80.0,
+            "available_sick_hours": 40.0,
+            "notes": "",
+            "active": True,
+        },
+    ]
+    export_path = tmp_path / "drivers.csv"
+    monkeypatch.setattr(eb.filedialog, "asksaveasfilename", lambda **kwargs: str(export_path))
+    monkeypatch.setattr(eb.messagebox, "showinfo", lambda *args, **kwargs: None)
+    instance._export_driver_list()
+
+    with export_path.open(encoding="utf-8") as file:
+        lines = [line.strip() for line in file.readlines()]
+    assert lines[0] == "Employee ID,Employee Name,Hire Date,Title,DOB,DL No. - State"
+    assert any("Active Driver" in line for line in lines[1:])
+    assert not any("Inactive Driver" in line for line in lines[1:])
+    assert not any("Active Non Driver" in line for line in lines[1:])
 
 
 def test_deductions_weekly_uses_monthly_minus_employer(app):
